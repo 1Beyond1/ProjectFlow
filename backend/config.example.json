@@ -1,0 +1,77 @@
+{
+    "vendors": {
+        "SiliconFlow": {
+            "base_url": "https://api.siliconflow.cn/v1",
+            "api_key": "YOUR_SILICONFLOW_API_KEY_HERE"
+        }
+    },
+    "defaults": {
+        "free": {
+            "llm": "Qwen/Qwen3-8B",
+            "vision": "THUDM/GLM-4.1V-9B-Thinking",
+            "stt": "FunAudioLLM/SenseVoiceSmall"
+        },
+        "vip": {
+            "llm": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+            "vision": "THUDM/GLM-4.1V-9B-Thinking",
+            "stt": "FunAudioLLM/SenseVoiceSmall"
+        }
+    },
+    "models": {
+        "llm": [
+            {
+                "id": "Qwen/Qwen3-8B",
+                "name": "Qwen3-8B",
+                "vendor": "SiliconFlow",
+                "tier": "free",
+                "is_default": true
+            },
+            {
+                "id": "Qwen/Qwen2.5-7B-Instruct",
+                "name": "Qwen2.5-7B-Instruct",
+                "vendor": "SiliconFlow",
+                "tier": "free",
+                "tag": "快速模型"
+            },
+            {
+                "id": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+                "name": "DeepSeek-R1-0528-Qwen3-8B",
+                "vendor": "SiliconFlow",
+                "tier": "vip"
+            },
+            {
+                "id": "THUDM/GLM-Z1-9B-0414",
+                "name": "GLM-Z1-9B-0414",
+                "vendor": "SiliconFlow",
+                "tier": "vip"
+            }
+        ],
+        "vision": [
+            {
+                "id": "THUDM/GLM-4.1V-9B-Thinking",
+                "name": "GLM-4.1V-9B-Thinking",
+                "vendor": "SiliconFlow",
+                "tiers": ["free", "vip"],
+                "is_default": true
+            }
+        ],
+        "stt": [
+            {
+                "id": "FunAudioLLM/SenseVoiceSmall",
+                "name": "SenseVoiceSmall",
+                "vendor": "SiliconFlow",
+                "tiers": ["free", "vip"],
+                "is_default": true
+            }
+        ]
+    },
+    "jwt": {
+        "secret_key": "YOUR_JWT_SECRET_KEY_HERE",
+        "algorithm": "HS256",
+        "access_token_expire_minutes": 60,
+        "refresh_token_expire_days": 30
+    },
+    "limits": {
+        "free_daily_limit": 10
+    }
+}

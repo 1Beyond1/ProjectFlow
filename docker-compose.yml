@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flow-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=mysql+aiomysql://root:${MYSQL_PASSWORD}@host.docker.internal:3306/project_flow
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      # 如果在 1panel 内部网络，可能需要使用具体的 IP 或 network alias
+      # host.docker.internal 在某些 Linux 环境需要额外配置，下文 network_mode host 是一种解法
+    # network_mode: "host" # 简单粗暴连通宿主机数据库，或使用 bridge + internal ip
+
+networks:
+  default:
+    driver: bridge

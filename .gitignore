@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+backend/venv/
+.venv/
+venv/
+
+# Database
+*.db
+*.sqlite3
+
+# Temp files
+backend/temp_audio/
+backend/temp_images/
+
+# Sensitive config
+backend/config.json
+
+# Node
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
