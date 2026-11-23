@@ -34,12 +34,18 @@ cp backend/config.example.json backend/config.json
 编辑 `backend/config.json`，填入上游模型服务商的 `api_key`（格式详见 [CONFIG_GUIDE.md](CONFIG_GUIDE.md)）。
 
 ### 2.2 配置环境变量
-在项目根目录创建 `.env` 文件（权限设为 `chmod 600 .env`），供 `docker-compose.yml` 引用：
+先在终端生成 64 位随机 JWT 密钥（**注意：Docker Compose 不会执行 `.env` 中的 `$(...)` 子命令，请勿把 `$(openssl rand -hex 32)` 直接写入 `.env`**）：
 
 ```bash
+openssl rand -hex 32
+```
+
+然后在项目根目录创建 `.env` 文件（权限设为 `chmod 600 .env`），将上一步输出的 64 位十六进制密钥粘贴到 `JWT_SECRET_KEY` 中：
+
+```dotenv
 MYSQL_PASSWORD=你的强数据库密码
 REDIS_PASSWORD=你的强Redis密码
-JWT_SECRET_KEY=$(openssl rand -hex 32)
+JWT_SECRET_KEY=请粘贴上一步生成的64位十六进制随机密钥
 CORS_ALLOW_ORIGINS=https://flow.example.com
 ```
 

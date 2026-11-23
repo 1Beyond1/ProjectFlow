@@ -431,6 +431,128 @@ def test_be06_sanitize_null_filename_and_be15_cors_env_origins(monkeypatch):
     assert "*" not in origins
 
 
+def test_p1_3_process_audio_cleans_temp_file_on_http_exceptions(isolated_env, monkeypatch):
+    class FailSTTClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, **kwargs):
+            return _MockLLMResponse(status_code=500)
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FailSTTClient)
+
+    async def _run():
+        async with make_async_client() as client:
+            auth_data = await register_user(client, "audio_cleanup_user")
+            headers = {"Authorization": f"Bearer {auth_data['access_token']}"}
+
+            # 1. 上游 STT 失败抛出 502 HTTPException，临时音频文件必须被 finally 清理
+            r_502 = await client.post(
+                "/api/process-audio",
+                files={"file": ("clip.aac", b"FAKE_AUDIO_BYTES", "audio/aac")},
+                headers=headers,
+            )
+            assert r_502.status_code == 502
+            assert list(main_module.TEMP_DIR.glob("*")) == []
+
+            # 2. 消耗完当日额度后再次上传触发 429 HTTPException，临时音频文件也必须被清理
+            db_u = await database_module.get_user_by_username("audio_cleanup_user")
+            await database_module.reserve_user_quota(db_u.id, "text", free_daily_limit=2)
+            await database_module.reserve_user_quota(db_u.id, "text", free_daily_limit=2)
+
+            r_429 = await client.post(
+                "/api/process-audio",
+                files={"file": ("clip2.aac", b"FAKE_AUDIO_BYTES", "audio/aac")},
+                headers=headers,
+            )
+            assert r_429.status_code == 429
+            assert list(main_module.TEMP_DIR.glob("*")) == []
+
+    asyncio.run(_run())
+
+
+def test_p2_lowercase_bearer_ban_pomodoro_end_at_bounds_and_analyze_malformed_json(isolated_env, monkeypatch):
+    class MalformedResponse:
+        status_code = 200
+        text = "not-json"
+
+        def json(self):
+            return {"unexpected": "shape"}
+
+    class MalformedClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, **kwargs):
+            return MalformedResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", MalformedClient)
+
+    async def _run():
+        async with make_async_client() as client:
+            # 1. 小写 bearer 同样命中 ban_check_middleware，返回 ACCOUNT_BANNED + force_logout + CORS
+            banned_auth = await register_user(client, "lower_bearer_user")
+            await set_user_banned("lower_bearer_user", 1)
+            await main_module.sync_banned_users_once(isolated_env["redis"])
+
+            r_ban = await client.get(
+                "/auth/me",
+                headers={
+                    "Authorization": f"bearer {banned_auth['access_token']}",
+                    "Origin": "http://localhost:8081",
+                },
+            )
+            assert r_ban.status_code == 403
+            body = r_ban.json()
+            assert body["code"] == "ACCOUNT_BANNED"
+            assert body["force_logout"] is True
+            assert r_ban.headers.get("access-control-allow-origin") == "http://localhost:8081"
+
+            # 2. 番茄钟方式 2（end_at + tz_offset_minutes）远未来时间必须返回 422
+            vip_auth = await register_user(client, "vip_p2_user")
+            await set_user_vip("vip_p2_user")
+            vip_headers = {"Authorization": f"Bearer {vip_auth['access_token']}"}
+            r_future_end = await client.post(
+                "/api/pomodoro/end",
+                headers=vip_headers,
+                json={
+                    "session_id": "future-end-at",
+                    "duration_sec": 600,
+                    "status": "completed",
+                    "end_at": "2099-06-01T12:00:00Z",
+                    "tz_offset_minutes": 480,
+                },
+            )
+            assert r_future_end.status_code == 422
+
+            # 3. analyze-tasks 上游返回 200 但缺 choices 键应返回 502 而非 500
+            r_bad_ai = await client.post(
+                "/api/analyze-tasks",
+                headers=vip_headers,
+                json={
+                    "tasks": [{"title": "写周报", "completed": True}],
+                    "period": "weekly",
+                    "start_date": "2026-05-01",
+                    "end_date": "2026-05-07",
+                },
+            )
+            assert r_bad_ai.status_code == 502
+
+    asyncio.run(_run())
+
+
 # ==================== BE-13 / BE-15: 登录防枚举 & X-Client-Time 防注入 ====================
 
 def test_be13_login_anti_enumeration_and_be15_client_time_validation(isolated_env):

@@ -61,9 +61,9 @@ def validate_jwt_secret(secret: Optional[str]) -> str:
 
 
 def _get_valid_env_jwt_secret() -> Optional[str]:
-    """优先读取环境变量 JWT_SECRET_KEY；若已设置但无效则立即报错"""
+    """优先读取环境变量 JWT_SECRET_KEY；未设置或空白字符串视为未覆盖，非空但无效则立即报错"""
     raw = os.getenv("JWT_SECRET_KEY")
-    if raw is None:
+    if raw is None or not raw.strip():
         return None
     return validate_jwt_secret(raw)
 
@@ -88,8 +88,7 @@ def load_config() -> dict:
         if _last_valid_config is not None:
             return copy.deepcopy(_last_valid_config)
         # 无本地配置文件时，若环境变量提供了有效 JWT 密钥，允许以纯环境变量模式运行
-        if os.getenv("JWT_SECRET_KEY") is not None:
-            _get_valid_env_jwt_secret()
+        if _get_valid_env_jwt_secret() is not None:
             return {}
         raise RuntimeError("无法加载有效配置文件且未配置有效的 JWT_SECRET_KEY") from e
 
@@ -234,10 +233,20 @@ def _ensure_not_banned(user) -> None:
         )
 
 
+def _ensure_active_session(user) -> None:
+    """确保会话未被登出或重放吊销（user_token 清空后旧 access_token 立即失效）"""
+    if not getattr(user, "user_token", None):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录会话已失效，请重新登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """可选的用户认证 (未提供凭证返回 None；提供凭证时强制校验 access 类型与封禁状态)"""
+    """可选的用户认证 (未提供凭证返回 None；提供凭证时强制校验 access 类型、封禁状态与会话有效性)"""
     if not credentials:
         return None
 
@@ -251,13 +260,14 @@ async def get_current_user_optional(
         )
 
     _ensure_not_banned(user)
+    _ensure_active_session(user)
     return user
 
 
 async def get_current_user_required(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """必须的用户认证（强制校验 access 类型与封禁状态）"""
+    """必须的用户认证（强制校验 access 类型、封禁状态与会话有效性）"""
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -275,6 +285,7 @@ async def get_current_user_required(
         )
 
     _ensure_not_banned(user)
+    _ensure_active_session(user)
     return user
 
 

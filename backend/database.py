@@ -150,7 +150,7 @@ async def _ensure_user_columns(conn):
 
 
 async def _ensure_device_usage_unique_index(conn):
-    """确保 device_usage 存在 (device_id, usage_date) 唯一索引"""
+    """确保 device_usage 存在 (device_id, usage_date) 唯一索引（兼容 SQLite 与存量 MySQL）"""
     if DATABASE_URL.startswith("sqlite"):
         try:
             await conn.execute(
@@ -159,6 +159,20 @@ async def _ensure_device_usage_unique_index(conn):
                     "ON device_usage (device_id, usage_date)"
                 )
             )
+        except Exception:
+            pass
+    else:
+        try:
+            res = await conn.execute(
+                text("SHOW INDEX FROM device_usage WHERE Key_name = 'uq_device_usage_date'")
+            )
+            if not res.fetchall():
+                await conn.execute(
+                    text(
+                        "ALTER TABLE device_usage "
+                        "ADD UNIQUE INDEX uq_device_usage_date (device_id, usage_date)"
+                    )
+                )
         except Exception:
             pass
 
@@ -237,13 +251,28 @@ async def get_user_by_id(user_id: int) -> Optional[User]:
 
 
 async def update_user_token(user_id: int, token: Optional[str]):
-    """更新或清空用户 Refresh Token 哈希"""
+    """原子更新或清空用户 Refresh Token 哈希"""
     async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if user:
-            user.user_token = token
-            await session.commit()
+        async with session.begin():
+            await session.execute(
+                update(User).where(User.id == user_id).values(user_token=token)
+            )
+
+
+async def rotate_user_token_cas(user_id: int, expected_hash: str, new_hash: str) -> bool:
+    """原子 CAS 轮换用户 Refresh Token 哈希，防止并发重放与登出复活"""
+    async with async_session_maker() as session:
+        async with session.begin():
+            res = await session.execute(
+                update(User)
+                .where(
+                    User.id == user_id,
+                    User.user_token == expected_hash,
+                    User.is_banned == 0,
+                )
+                .values(user_token=new_hash)
+            )
+            return res.rowcount == 1
 
 
 async def update_user_device_id(user_id: int, device_id: str):

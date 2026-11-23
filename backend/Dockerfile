@@ -16,10 +16,10 @@ RUN groupadd --system appuser \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制后端代码并设置目录权限
+# 复制后端代码并设置 /app 目录权限（确保独立 SQLite 模式与临时目录均可正常读写）
 COPY --chown=appuser:appuser . .
 RUN mkdir -p /app/temp_audio /app/temp_images \
-    && chown -R appuser:appuser /app/temp_audio /app/temp_images
+    && chown -R appuser:appuser /app
 
 # 切换到非 root 用户
 USER appuser

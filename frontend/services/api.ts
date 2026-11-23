@@ -80,11 +80,15 @@ const handleBannedResponse = (payload: any, t: (key: string) => string) => {
     return false;
 };
 
-const parseErrorPayload = async (response: Response) => {
+const parseErrorPayload = async (response: Response): Promise<Record<string, any>> => {
     const text = await response.text();
     if (!text) return {};
     try {
-        return JSON.parse(text);
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed;
+        }
+        return { detail: text };
     } catch {
         return { detail: text };
     }
@@ -493,7 +497,15 @@ export const testConnection = async (): Promise<{ success: boolean; message: str
         const { apiUrl, llmBaseUrl, llmApiKey } = useConfigStore.getState();
 
         if (!apiUrl) return { success: false, message: t('api.test.missingApiUrl') };
-        // API Key 已交由后端校验
+
+        // 托管模式下前端未配置自定义 LLM Key 时，检测后端健康检查接口连通性
+        if (!llmApiKey || !llmApiKey.trim()) {
+            const health = await healthCheck();
+            if (health.status === 'healthy' || health.status === 'ok') {
+                return { success: true, message: t('settings.alert.connection.success') };
+            }
+            return { success: false, message: health.message || t('settings.alert.connection.failure') };
+        }
 
         const response = await fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/test-connection`, {
             method: 'POST',
@@ -529,7 +541,7 @@ export async function healthCheck(): Promise<{ status: string; message?: string 
     const t = useLanguageStore.getState().t;
 
     try {
-        const response = await fetch(`${config.apiUrl}/api/health`);
+        const response = await fetch(`${config.apiUrl.replace(/\/$/, '')}/api/health`);
 
         if (!response.ok) {
             return { status: 'error', message: `${t('api.health.serverErrorPrefix')}${response.status}` };

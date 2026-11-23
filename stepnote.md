@@ -608,3 +608,32 @@
 1. **后端 P0/P1 安全与稳定性**：新增 `backend/security.py` 实现出站 HTTPS/DNS/IP SSRF 校验、URL 脱敏、客户端时间严格校验与分块流式上传限流；`/api/records` 强制鉴权按 `user_id` 隔离；移除硬编码弱 JWT 密钥并强制启动与验签校验；Refresh Token 引入 `jti` + SHA-256 哈希轮换/重放吊销并新增 `POST /auth/logout`；封禁校验在 Redis 不可用时回落数据库 Fail-Closed 且调整中间件顺序保证 403 带 CORS 头；配额改用条件更新原子预扣与失败回滚；番茄钟显式 `flag_modified`、提交失败清理 Redis dedup key、挂载 `/api/pomodoro/*`（保留 `/pomodoro/*` 兼容）；改用原生 `bcrypt` 消除 `passlib` 兼容问题并升级加固 `Dockerfile` / `docker-compose.yml`。
 2. **前端核心修复**：新增 `formatLocalDate`/`formatLocalDateTime` 全面替换本地日期 `toISOString` 用法修复东八区偏移；修正番茄钟时区偏移符号；为 `refreshAccessToken` 加 singleflight 锁、`fetchUserInfo` 限次重试且仅 401/403 登出；`stats.tsx` 改走 `fetchWithAuth` 并防护柱状图除零；支持 `EXPO_PUBLIC_API_URL` 与设置页编辑保存 `apiUrl`；等待 Zustand persist 水合后再初始化 `deviceId`；修复 `useBanCheck`、`parseErrorPayload`、Web `FormData` Blob 上传及 `VoiceInputBar` 失败恢复文本。
 3. **测试与工程化**：新增 20 项 `backend/tests/` `pytest` 测试覆盖全部 P0 与核心 P1，新增 `.github/workflows/ci.yml`，升级 `setup.sh` 生成 v2 `config.json` 并同步部署与配置文档。
+
+
+## 2026-11-23 | 红队复审 P1/P2 收口加固
+
+**When**: 2026-11-23 18:00
+**Where**:
+- backend/database.py
+- backend/auth.py
+- backend/routers/auth.py
+- backend/security.py
+- backend/main.py
+- backend/schemas/pomodoro.py
+- backend/Dockerfile
+- docker-compose.yml
+- CLOUD_DEPLOYMENT.md
+- setup.sh
+- frontend/store/useAuthStore.ts
+- frontend/services/api.ts
+- backend/tests/test_security_p0.py
+- backend/tests/test_core_p1.py
+
+**Why**: 响应红队独立复审发现的 4 项 P1 与 8 项 P2，彻底消除并发刷新重放/登出复活、DNS Rebinding TOCTOU、音频异常临时文件泄漏及容器空环境变量部署坑。
+
+**What**:
+1. **P1-1 / P2-2**：新增 `rotate_user_token_cas` 原子 CAS 更新并在失败时清空 `user_token = NULL`；`get_current_user_*` 增加会话有效性校验（`user_token` 为空立即 401），登出与重放吊销后旧 `access_token` 同步失效。
+2. **P1-2 / P2-1**：`validate_outbound_url` 收紧端口白名单（默认仅 `443`，可配 `ALLOWED_OUTBOUND_PORTS`），拦截 `:0`、`@` userinfo、`?query`/`#fragment`；新增 `PinnedNetworkBackend` 与 `build_pinned_transport` 在连接层固定已校验公网 IP 阻断 DNS Rebinding 并统一 `/api/test-connection` 失败文案。
+3. **P1-3**：`/api/process-audio` 改用 `finally: delete_temp_file(temp_path)` 确保 429/400/502 等所有异常路径 100% 清理临时文件。
+4. **P1-4 / P2-8**：`JWT_SECRET_KEY=""` 空串视为未由环境变量覆盖（仍对 `config.json` 严格 Fail-Closed）；`docker-compose.yml` 补齐 `extra_hosts`、`Dockerfile` 给 `/app` `chown` 到 `appuser`、`CLOUD_DEPLOYMENT.md` 修正 `.env` 密钥生成方式、`setup.sh` 激活后统一用 venv `python`、`analyze_tasks` 捕获上游畸形 JSON 返回 502。
+5. **P2 收口**：`ban_check_middleware` 大小写不敏感匹配 `bearer `；存量 MySQL 同步补建 `uq_device_usage_date`；番茄钟 `end_at + tz_offset_minutes` 增加日期范围校验；前端 `useAuthStore` 引入 `authSessionEpoch` 防止在途刷新覆写登出态；`parseErrorPayload` 防非对象 JSON、托管模式下 `testConnection` 检测 `/api/health`。

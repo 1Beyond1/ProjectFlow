@@ -35,6 +35,8 @@ const translateAuthDetail = (
 
 // Singleflight 刷新锁，避免并发 401 触发多次 /auth/refresh 导致旧令牌重放被吊销
 let refreshPromise: Promise<boolean> | null = null;
+// 会话代次：每次登录/注册/登出递增，防止在途 refresh/fetchUserInfo 返回后把已登出状态覆写回已登录
+let authSessionEpoch = 0;
 const MAX_FETCH_USER_RETRIES = 1;
 
 export interface User {
@@ -127,6 +129,7 @@ export const useAuthStore = create<AuthState>()(
                         return false;
                     }
 
+                    authSessionEpoch += 1;
                     set({
                         user: data.user,
                         accessToken: data.access_token,
@@ -180,6 +183,7 @@ export const useAuthStore = create<AuthState>()(
                         return false;
                     }
 
+                    authSessionEpoch += 1;
                     set({
                         user: data.user,
                         accessToken: data.access_token,
@@ -201,6 +205,7 @@ export const useAuthStore = create<AuthState>()(
             },
 
             logout: () => {
+                authSessionEpoch += 1;
                 const token = get().accessToken;
                 const apiUrl = useConfigStore.getState().apiUrl?.replace(/\/$/, '');
 
@@ -238,6 +243,7 @@ export const useAuthStore = create<AuthState>()(
                 const runFetch = async (attempt: number): Promise<void> => {
                     const { accessToken } = get();
                     if (!accessToken) return;
+                    const startEpoch = authSessionEpoch;
 
                     try {
                         const apiUrl = useConfigStore.getState().apiUrl.replace(/\/$/, '');
@@ -248,8 +254,15 @@ export const useAuthStore = create<AuthState>()(
                             },
                         });
 
+                        if (authSessionEpoch !== startEpoch || get().accessToken !== accessToken) {
+                            return;
+                        }
+
                         if (response.ok) {
                             const user = await response.json();
+                            if (authSessionEpoch !== startEpoch || get().accessToken !== accessToken) {
+                                return;
+                            }
                             set({ user, isLoggedIn: true });
                         } else if (response.status === 401) {
                             if (attempt >= MAX_FETCH_USER_RETRIES) {
@@ -293,6 +306,7 @@ export const useAuthStore = create<AuthState>()(
 
                 const { refreshToken } = get();
                 if (!refreshToken) return false;
+                const startEpoch = authSessionEpoch;
 
                 refreshPromise = (async () => {
                     try {
@@ -303,6 +317,11 @@ export const useAuthStore = create<AuthState>()(
                             body: JSON.stringify({ refresh_token: refreshToken }),
                         });
 
+                        // 若在途期间用户已登出或切换账号，绝不覆写状态
+                        if (authSessionEpoch !== startEpoch || get().refreshToken !== refreshToken) {
+                            return false;
+                        }
+
                         if (!response.ok) {
                             // 仅在 401/403 明确认证失败时登出，避免临时 5xx 误清会话
                             if (response.status === 401 || response.status === 403) {
@@ -312,6 +331,9 @@ export const useAuthStore = create<AuthState>()(
                         }
 
                         const data = await response.json();
+                        if (authSessionEpoch !== startEpoch || get().refreshToken !== refreshToken) {
+                            return false;
+                        }
                         set({
                             user: data.user,
                             accessToken: data.access_token,

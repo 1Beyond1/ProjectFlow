@@ -22,7 +22,6 @@ from typing import List, Optional
 import httpx
 import redis.asyncio as redis
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -60,6 +59,8 @@ from database import (
 from models import User
 from schemas import AIParseResult, ProcessAudioResponse, TaskItem
 from security import (
+    ValidatedOutboundTarget,
+    build_pinned_transport,
     detect_image_mime,
     save_upload_file_limited,
     validate_client_time,
@@ -128,11 +129,12 @@ async def resolve_provider_credentials(
     client_key: Optional[str],
     client_base_url: Optional[str],
     prefer_client_key: bool = False,
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[ValidatedOutboundTarget]]:
     """
     安全解析上游服务商凭据与地址：
     - 严禁将服务端 api_key 发送到客户端提供的任意 Base-Url
-    - 仅当客户端显式提供自有 api_key 且实际采用客户端 key 时，才允许使用客户端 Base-Url，且必须通过 SSRF 校验
+    - 仅当客户端显式提供自有 api_key 且实际采用客户端 key 时，才允许使用客户端 Base-Url，
+      且必须通过 SSRF 校验并返回固定 IP 目标（防 DNS Rebinding）
     """
     srv_key = (server_api_key or "").strip()
     srv_url = (server_base_url or "").strip() or DEFAULT_PROVIDER_BASE_URL
@@ -141,20 +143,24 @@ async def resolve_provider_credentials(
 
     if prefer_client_key:
         if cli_key:
-            final_url = await validate_outbound_url(cli_url) if cli_url else srv_url
-            return cli_key, final_url
+            if cli_url:
+                target = await validate_outbound_url(cli_url)
+                return cli_key, target.base_url, target
+            return cli_key, srv_url, None
         # 客户端未传自有 Key 时绝对不采信客户端 Base-Url
-        return srv_key, srv_url
+        return srv_key, srv_url, None
 
     if _is_usable_server_key(srv_key):
         # 服务端已配置有效 Key：始终使用服务端 Base-Url，绝不采信客户端 Base-Url
-        return srv_key, srv_url
+        return srv_key, srv_url, None
 
     if cli_key:
-        final_url = await validate_outbound_url(cli_url) if cli_url else srv_url
-        return cli_key, final_url
+        if cli_url:
+            target = await validate_outbound_url(cli_url)
+            return cli_key, target.base_url, target
+        return cli_key, srv_url, None
 
-    return "", srv_url
+    return "", srv_url, None
 
 
 async def sync_banned_users_once(redis_client) -> None:
@@ -232,8 +238,9 @@ app = FastAPI(
 @app.middleware("http")
 async def ban_check_middleware(request, call_next):
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
+    parts = auth_header.split(None, 1) if auth_header else []
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        token = parts[1].strip()
         try:
             payload = decode_token(token)
         except RuntimeError:
@@ -354,16 +361,26 @@ def _get_vendor_for_entry(entry: Optional[dict], fallback_config: dict) -> tuple
     return fallback_config.get("api_key", ""), fallback_config.get("base_url", "")
 
 
+def _build_outbound_client(timeout: float, pinned_target: Optional[ValidatedOutboundTarget] = None) -> httpx.AsyncClient:
+    """构建禁用重定向的出站客户端；当存在客户端自定义目标时在连接层固定已校验公网 IP"""
+    kwargs = {"timeout": timeout, "follow_redirects": False}
+    if pinned_target is not None:
+        kwargs["transport"] = build_pinned_transport(pinned_target)
+        kwargs["trust_env"] = False
+    return httpx.AsyncClient(**kwargs)
+
+
 async def call_stt_api(
     file_path: Path,
     api_key: str,
     base_url: str = DEFAULT_PROVIDER_BASE_URL,
     model: str = "FunAudioLLM/SenseVoiceSmall",
+    pinned_target: Optional[ValidatedOutboundTarget] = None,
 ) -> str:
-    """调用 STT API 进行语音转文字（禁用重定向并脱敏上游报错）"""
+    """调用 STT API 进行语音转文字（禁用重定向、支持 IP 固定并脱敏上游报错）"""
     url = f"{base_url.rstrip('/')}/audio/transcriptions"
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+    async with _build_outbound_client(60.0, pinned_target=pinned_target) as client:
         with open(file_path, "rb") as f:
             files = {"file": (file_path.name, f, "audio/aac")}
             data = {"model": model}
@@ -400,8 +417,9 @@ async def call_llm_api(
     base_url: str = DEFAULT_PROVIDER_BASE_URL,
     model: str = "Qwen/Qwen2.5-7B-Instruct",
     client_time: Optional[str] = None,
+    pinned_target: Optional[ValidatedOutboundTarget] = None,
 ) -> AIParseResult:
-    """调用 LLM API 解析文本，提取任务信息（严格校验时间、禁用重定向、脱敏报错）"""
+    """调用 LLM API 解析文本，提取任务信息（严格校验时间、禁用重定向、支持 IP 固定、脱敏报错）"""
     validated_time = validate_client_time(client_time)
     current_time_str = validated_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -484,7 +502,7 @@ Output: {{
     base_url = base_url.rstrip("/")
     url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+    async with _build_outbound_client(60.0, pinned_target=pinned_target) as client:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -551,8 +569,9 @@ async def call_vision_api(
     base_url: str = DEFAULT_PROVIDER_BASE_URL,
     model: str = "THUDM/GLM-4.1V-9B-Thinking",
     mime_type: str = "image/jpeg",
+    pinned_target: Optional[ValidatedOutboundTarget] = None,
 ) -> AIParseResult:
-    """调用多模态模型进行图片解析（禁用重定向、不打印密钥、脱敏报错）"""
+    """调用多模态模型进行图片解析（禁用重定向、支持 IP 固定、不打印密钥、脱敏报错）"""
     url = f"{base_url.rstrip('/')}/chat/completions"
 
     with open(image_path, "rb") as f:
@@ -596,7 +615,7 @@ async def call_vision_api(
         "temperature": 0.2,
     }
 
-    async with httpx.AsyncClient(timeout=90.0, follow_redirects=False) as client:
+    async with _build_outbound_client(90.0, pinned_target=pinned_target) as client:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -734,7 +753,6 @@ async def get_models(
 
 @app.post("/api/process-audio", response_model=ProcessAudioResponse)
 async def process_audio(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     x_stt_base_url: Optional[str] = Header(None, alias="X-STT-Base-Url"),
     x_stt_key: Optional[str] = Header(None, alias="X-STT-Key"),
@@ -766,7 +784,6 @@ async def process_audio(
             MAX_AUDIO_FILE_SIZE,
             "音频文件过大 (限制 10MB)",
         )
-        background_tasks.add_task(delete_temp_file, temp_path)
 
         # 2. 校验模型与权限
         catalog = get_model_catalog()
@@ -801,13 +818,13 @@ async def process_audio(
             )
         llm_is_vip = is_vip_model(llm_entry)
 
-        # 3. 安全解析 STT 与 LLM 上游凭据（防 SSRF & 服务端 Key 泄露）
+        # 3. 安全解析 STT 与 LLM 上游凭据（防 SSRF、DNS Rebinding & 服务端 Key 泄露）
         srv_stt_key, srv_stt_url = _get_vendor_for_entry(stt_entry, stt_config)
-        final_stt_key, final_stt_base_url = await resolve_provider_credentials(
+        final_stt_key, final_stt_base_url, stt_target = await resolve_provider_credentials(
             srv_stt_key, srv_stt_url, x_stt_key, x_stt_base_url, prefer_client_key=False
         )
         srv_llm_key, srv_llm_url = _get_vendor_for_entry(llm_entry, llm_config)
-        final_llm_key, final_llm_base_url = await resolve_provider_credentials(
+        final_llm_key, final_llm_base_url, llm_target = await resolve_provider_credentials(
             srv_llm_key, srv_llm_url, x_llm_key, x_llm_base_url, prefer_client_key=False
         )
 
@@ -832,7 +849,13 @@ async def process_audio(
             guest_text_reserved = True
 
         # 5. 调用 STT API
-        raw_text = await call_stt_api(temp_path, final_stt_key, final_stt_base_url, requested_stt_model)
+        raw_text = await call_stt_api(
+            temp_path,
+            final_stt_key,
+            final_stt_base_url,
+            requested_stt_model,
+            pinned_target=stt_target,
+        )
 
         if not raw_text.strip():
             if user_quota_reserved and current_user:
@@ -854,6 +877,7 @@ async def process_audio(
             final_llm_base_url,
             requested_llm_model,
             client_time=validated_client_time,
+            pinned_target=llm_target,
         )
 
         # 7. 保存到数据库
@@ -889,6 +913,8 @@ async def process_audio(
             raw_text="",
             error="音频处理失败，请稍后重试",
         )
+    finally:
+        delete_temp_file(temp_path)
 
 
 class ProcessTextRequest(BaseModel):
@@ -939,7 +965,7 @@ async def process_text(
         llm_is_vip = is_vip_model(llm_entry)
 
         srv_llm_key, srv_llm_url = _get_vendor_for_entry(llm_entry, llm_config)
-        final_llm_key, final_llm_base_url = await resolve_provider_credentials(
+        final_llm_key, final_llm_base_url, llm_target = await resolve_provider_credentials(
             srv_llm_key, srv_llm_url, x_llm_key, x_llm_base_url, prefer_client_key=False
         )
 
@@ -961,6 +987,7 @@ async def process_text(
             final_llm_base_url,
             requested_llm_model,
             client_time=validated_client_time,
+            pinned_target=llm_target,
         )
 
         ai_json = ai_result.model_dump_json()
@@ -1057,7 +1084,7 @@ async def process_image(
         # 4. 严格隔离服务端 Key 与客户端 Base-Url：未传自有 X-Vision-Key 时绝不采信 X-Vision-Base-Url
         vision_default_cfg = get_model_config_for_tier(user_tier, "vision")
         srv_vision_key, srv_vision_url = _get_vendor_for_entry(vision_entry, vision_default_cfg)
-        final_vision_key, final_vision_base_url = await resolve_provider_credentials(
+        final_vision_key, final_vision_base_url, vision_target = await resolve_provider_credentials(
             srv_vision_key,
             srv_vision_url,
             x_vision_key,
@@ -1081,6 +1108,7 @@ async def process_image(
             final_vision_base_url,
             requested_vision_model,
             mime_type=detected_mime,
+            pinned_target=vision_target,
         )
 
         ai_json = ai_result.model_dump_json()
@@ -1138,13 +1166,13 @@ async def test_connection(
     _current_user: User = Depends(get_current_user_required),
 ):
     """
-    测试 LLM API 连接（需登录鉴权 + 严格出站 URL SSRF 校验 + 禁用重定向 + 脱敏响应）
+    测试 LLM API 连接（需登录鉴权 + 严格出站 SSRF 校验 + 连接层 IP 固定防 DNS Rebinding + 禁用重定向 + 统一脱敏响应）
     """
-    validated_base_url = await validate_outbound_url(x_llm_base_url)
-    url = f"{validated_base_url}/models"
+    target = await validate_outbound_url(x_llm_base_url)
+    url = f"{target.base_url}/models"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+        async with _build_outbound_client(10.0, pinned_target=target) as client:
             response = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {x_llm_key}"},
@@ -1154,9 +1182,8 @@ async def test_connection(
             if response.status_code in (401, 403):
                 return {"success": False, "message": "API Key 无效或无权限"}
             return {"success": False, "message": f"验证失败 (HTTP {response.status_code})"}
-    except httpx.TimeoutException:
-        return {"success": False, "message": "连接超时，请稍后重试"}
     except Exception as e:
+        # 统一失败文案（不区分超时与连接失败，避免端口探测预言机）
         print(f"⚠️ test-connection failed: {type(e).__name__}")
         return {"success": False, "message": "连接失败，请检查服务地址或网络配置"}
 
@@ -1242,13 +1269,16 @@ async def analyze_tasks(
                 print(f"❌ Analyze Tasks LLM Error Status: {response.status_code}")
                 raise HTTPException(status_code=502, detail="任务分析服务暂时不可用，请稍后重试")
 
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
+            try:
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError):
+                raise HTTPException(status_code=502, detail="任务分析返回数据结构异常")
 
             try:
                 parsed = json.loads(clean_json_string(content))
                 return parsed
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, TypeError):
                 raise HTTPException(status_code=502, detail="无法解析AI响应")
         except HTTPException:
             raise

@@ -418,9 +418,209 @@ def test_be04_jwt_type_confusion_and_refresh_rotation_replay_logout(isolated_env
 
             logout_resp = await client.post("/auth/logout", headers={"Authorization": f"Bearer {access_3}"})
             assert logout_resp.status_code == 200
+            # 登出后旧 access_token 与 refresh_token 均立即失效
+            assert (await client.get("/auth/me", headers={"Authorization": f"Bearer {access_3}"})).status_code == 401
+            assert (await client.get("/api/records", headers={"Authorization": f"Bearer {access_3}"})).status_code == 401
             assert (await client.post("/auth/refresh", json={"refresh_token": refresh_3})).status_code == 401
 
     asyncio.run(_run())
+
+
+def test_p1_1_concurrent_refresh_cas_and_logout_race_prevent_resurrection(isolated_env, monkeypatch):
+    async def _run():
+        async with make_async_client() as client:
+            # (a) 并发两次使用同一 Refresh Token R1 刷新 -> 严格禁止 (200, 200) 且会话被吊销
+            auth_a = await register_user(client, "cas_race_user")
+            r1 = auth_a["refresh_token"]
+            a1 = auth_a["access_token"]
+
+            from routers import auth as auth_router_module
+
+            orig_get_user = auth_router_module.get_user_by_id
+            barrier_count = {"n": 0}
+            both_read = asyncio.Event()
+
+            async def synced_get_user(uid: int):
+                user = await orig_get_user(uid)
+                barrier_count["n"] += 1
+                if barrier_count["n"] >= 2:
+                    both_read.set()
+                else:
+                    await asyncio.wait_for(both_read.wait(), timeout=2.0)
+                return user
+
+            monkeypatch.setattr(auth_router_module, "get_user_by_id", synced_get_user)
+            res1, res2 = await asyncio.gather(
+                client.post("/auth/refresh", json={"refresh_token": r1}),
+                client.post("/auth/refresh", json={"refresh_token": r1}),
+            )
+            monkeypatch.setattr(auth_router_module, "get_user_by_id", orig_get_user)
+
+            statuses = sorted([res1.status_code, res2.status_code])
+            assert statuses == [200, 401], f"Expected [200, 401], got {statuses}"
+            # 竞争失败方已清空 user_token，获胜方签发的 R2 与旧 A1 均立即失效
+            winner_resp = res1 if res1.status_code == 200 else res2
+            winner_r2 = winner_resp.json()["refresh_token"]
+            db_u = await database_module.get_user_by_username("cas_race_user")
+            assert db_u.user_token is None
+            assert (await client.post("/auth/refresh", json={"refresh_token": winner_r2})).status_code == 401
+            assert (await client.get("/auth/me", headers={"Authorization": f"Bearer {a1}"})).status_code == 401
+
+            # (b) refresh 校验后、CAS 写入前穿插 /auth/logout -> 不得复活会话
+            auth_b = await register_user(client, "logout_race_user")
+            rb1 = auth_b["refresh_token"]
+            ab1 = auth_b["access_token"]
+
+            orig_cas = auth_router_module.rotate_user_token_cas
+
+            async def cas_after_logout(user_id: int, expected_hash: str, new_hash: str):
+                # 模拟在 refresh 读完用户之后、写库之前，用户完成登出
+                logout_res = await client.post("/auth/logout", headers={"Authorization": f"Bearer {ab1}"})
+                assert logout_res.status_code == 200
+                return await orig_cas(user_id, expected_hash, new_hash)
+
+            monkeypatch.setattr(auth_router_module, "rotate_user_token_cas", cas_after_logout)
+            refresh_after_logout = await client.post("/auth/refresh", json={"refresh_token": rb1})
+            monkeypatch.setattr(auth_router_module, "rotate_user_token_cas", orig_cas)
+
+            assert refresh_after_logout.status_code == 401
+            db_b = await database_module.get_user_by_username("logout_race_user")
+            assert db_b.user_token is None
+            assert (await client.get("/auth/me", headers={"Authorization": f"Bearer {ab1}"})).status_code == 401
+
+    asyncio.run(_run())
+
+
+def test_p1_2_outbound_url_hardening_pinned_ip_backend_and_uniform_errors(isolated_env, monkeypatch):
+    import httpcore
+
+    async def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "api.public.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+        # 1. 严格拦截 :0、非白名单端口、空 userinfo、query、fragment
+        for bad_url in [
+            "https://93.184.216.34:0/v1",
+            "https://93.184.216.34:8443/v1",
+            "https://93.184.216.34:6379/v1",
+            "https://@93.184.216.34/v1",
+            "https://user:pass@93.184.216.34/v1",
+            "https://93.184.216.34/v1?foo=bar",
+            "https://93.184.216.34/v1#frag",
+        ]:
+            with pytest.raises(main_module.HTTPException) as exc:
+                await security_module.validate_outbound_url(bad_url)
+            assert exc.value.status_code == 400, f"Expected 400 for {bad_url}"
+
+        # 2. 端口白名单环境变量支持
+        monkeypatch.setenv("ALLOWED_OUTBOUND_PORTS", "443,8443")
+        target_8443 = await security_module.validate_outbound_url("https://api.public.example:8443/v1")
+        assert target_8443.port == 8443
+        assert target_8443.resolved_ips == ("93.184.216.34",)
+        monkeypatch.delenv("ALLOWED_OUTBOUND_PORTS", raising=False)
+
+        # 3. PinnedNetworkBackend 直接用已校验 IP 建连，绝不二次解析域名，且拒绝未匹配主机/端口/Unix Socket
+        seen_tcp = {}
+
+        class SpyInnerBackend:
+            async def connect_tcp(self, host, port, **kwargs):
+                seen_tcp["host"] = host
+                seen_tcp["port"] = port
+                return "mock-stream"
+
+            async def sleep(self, seconds):
+                return None
+
+        target = await security_module.validate_outbound_url("https://api.public.example/v1")
+        pinned = security_module.PinnedNetworkBackend(
+            pinned_host=target.hostname,
+            pinned_ips=target.resolved_ips,
+            allowed_port=target.port,
+            inner=SpyInnerBackend(),
+        )
+        stream = await pinned.connect_tcp("api.public.example", 443)
+        assert stream == "mock-stream"
+        assert seen_tcp == {"host": "93.184.216.34", "port": 443}
+
+        with pytest.raises(httpcore.ConnectError):
+            await pinned.connect_tcp("other.example", 443)
+        with pytest.raises(httpcore.ConnectError):
+            await pinned.connect_tcp("api.public.example", 8443)
+        with pytest.raises(httpcore.ConnectError):
+            await pinned.connect_unix_socket("/var/run/docker.sock")
+
+        # 4. /api/test-connection 注入 pinned transport + trust_env=False，且超时与连接错误文案完全一致
+        captured_kwargs = []
+        mode = {"exc": httpx.TimeoutException("timed out")}
+
+        class FailingSpyClient:
+            def __init__(self, *args, **kwargs):
+                captured_kwargs.append(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url, **kwargs):
+                raise mode["exc"]
+
+        monkeypatch.setattr(main_module.httpx, "AsyncClient", FailingSpyClient)
+        async with make_async_client() as client:
+            auth_data = await register_user(client, "pin_tester")
+            headers = {
+                "Authorization": f"Bearer {auth_data['access_token']}",
+                "X-LLM-Key": "sk-test",
+                "X-LLM-Base-Url": "https://api.public.example/v1",
+            }
+            r_timeout = await client.post("/api/test-connection", headers=headers)
+            mode["exc"] = httpx.ConnectError("connection refused")
+            r_conn = await client.post("/api/test-connection", headers=headers)
+
+            assert r_timeout.status_code == 200 and r_conn.status_code == 200
+            assert r_timeout.json()["message"] == r_conn.json()["message"]
+            assert captured_kwargs[0]["follow_redirects"] is False
+            assert captured_kwargs[0]["trust_env"] is False
+            assert isinstance(captured_kwargs[0]["transport"], httpx.AsyncHTTPTransport)
+            assert isinstance(
+                captured_kwargs[0]["transport"]._pool._network_backend,
+                security_module.PinnedNetworkBackend,
+            )
+
+    asyncio.run(_run())
+
+
+def test_p1_4_empty_jwt_secret_env_falls_back_to_valid_config_only(tmp_path, monkeypatch):
+    valid_cfg = tmp_path / "valid_cfg.json"
+    valid_cfg.write_text(json.dumps({"jwt": {"secret_key": TEST_JWT_SECRET}}), encoding="utf-8")
+    monkeypatch.setattr(auth_module, "CONFIG_PATH", valid_cfg)
+    auth_module.reset_config_cache()
+
+    # 空串环境变量不应崩溃，正确回退到 config.json 中的强密钥
+    monkeypatch.setenv("JWT_SECRET_KEY", "")
+    token = auth_module.create_access_token({"sub": "42"})
+    assert auth_module.decode_token(token)["sub"] == "42"
+
+    # 若 config.json 本身仍是占位符，空串环境变量依然 Fail-Closed 报错
+    bad_cfg = tmp_path / "bad_cfg.json"
+    bad_cfg.write_text(json.dumps({"jwt": {"secret_key": "YOUR_JWT_SECRET_KEY_HERE"}}), encoding="utf-8")
+    monkeypatch.setattr(auth_module, "CONFIG_PATH", bad_cfg)
+    auth_module.reset_config_cache()
+    with pytest.raises(RuntimeError):
+        auth_module.validate_jwt_config()
+
+    # 若环境变量非空但过短，即使 config.json 有效也立即 Fail-Closed 报错
+    monkeypatch.setattr(auth_module, "CONFIG_PATH", valid_cfg)
+    auth_module.reset_config_cache()
+    monkeypatch.setenv("JWT_SECRET_KEY", "too-short-env-key")
+    with pytest.raises(RuntimeError):
+        auth_module.validate_jwt_config()
 
 
 # ==================== P0 BE-05: 封禁 Fail-Closed、原子同步与 403 CORS ====================

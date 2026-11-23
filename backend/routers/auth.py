@@ -23,6 +23,7 @@ from database import (
     get_user_by_id,
     get_user_by_uid,
     get_user_by_username,
+    rotate_user_token_cas,
     update_user_device_id,
     update_user_token,
 )
@@ -294,7 +295,16 @@ async def refresh_token(request: RefreshRequest):
 
     new_access_token = create_access_token({"sub": str(user.id)})
     new_refresh_token = create_refresh_token({"sub": str(user.id)})
-    await update_user_token(user.id, hash_token(new_refresh_token))
+    new_hash = hash_token(new_refresh_token)
+
+    # 原子 CAS 轮换：并发重放、并发登出或并发封禁均会导致 rowcount != 1，立即清空会话防复活
+    rotated = await rotate_user_token_cas(user.id, incoming_hash, new_hash)
+    if not rotated:
+        await update_user_token(user.id, None)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="刷新令牌已失效，请重新登录",
+        )
 
     return TokenResponse(
         access_token=new_access_token,

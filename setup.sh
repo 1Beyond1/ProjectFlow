@@ -62,8 +62,8 @@ echo ""
 echo "📦 [2/4] 初始化数据库与配置文件..."
 echo "----------------------------"
 
-# 初始化数据库表结构
-$PYTHON_CMD -c "
+# 初始化数据库表结构（始终使用已激活虚拟环境内的 python，避免 Windows/msys 命中全局 python3）
+python -c "
 import asyncio
 from database import init_db
 asyncio.run(init_db())
@@ -74,7 +74,7 @@ print('✅ 数据库表结构已创建')
 if command -v openssl &> /dev/null; then
     JWT_SECRET="$(openssl rand -hex 32)"
 else
-    JWT_SECRET="$($PYTHON_CMD -c 'import secrets; print(secrets.token_hex(32))')"
+    JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 fi
 
 # 创建默认 v2 配置文件（与 backend/config.example.json 结构保持一致）

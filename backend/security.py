@@ -1,25 +1,59 @@
 """
 后端安全校验工具模块
-- 出站 URL SSRF 防护（HTTPS 校验、私网/保留地址拦截、DNS 解析校验）
+- 出站 URL SSRF 防护（HTTPS 校验、端口白名单、禁止 userinfo/query/fragment、私网/保留 IP 拦截、DNS 解析校验）
+- 连接层 IP 固定（PinnedNetworkBackend），彻底封堵 DNS Rebinding TOCTOU
 - 敏感 URL 脱敏（日志打印防密码泄露）
 - 客户端时间格式严格校验（防 Prompt 注入）
 - 上传文件分块限流与图片魔数校验
 """
 import asyncio
 import ipaddress
+import os
 import re
 import socket
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
+import httpcore
+import httpx
 from fastapi import HTTPException, UploadFile
 
 
 BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 CLIENT_TIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$")
+DEFAULT_ALLOWED_OUTBOUND_PORTS = {443}
+
+
+@dataclass(frozen=True)
+class ValidatedOutboundTarget:
+    """已校验的出站 HTTPS 目标（包含固定公网 IP，供连接层绑定防 DNS Rebinding）"""
+    base_url: str
+    hostname: str
+    port: int
+    resolved_ips: tuple[str, ...]
+
+
+def get_allowed_outbound_ports() -> set[int]:
+    """获取允许出站端口白名单（默认仅 443，可通过环境变量 ALLOWED_OUTBOUND_PORTS 覆盖）"""
+    raw = os.getenv("ALLOWED_OUTBOUND_PORTS", "").strip()
+    if not raw:
+        return set(DEFAULT_ALLOWED_OUTBOUND_PORTS)
+    ports: set[int] = set()
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        try:
+            port_num = int(cleaned)
+        except ValueError:
+            continue
+        if 1 <= port_num <= 65535:
+            ports.add(port_num)
+    return ports or set(DEFAULT_ALLOWED_OUTBOUND_PORTS)
 
 
 def _is_public_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -40,28 +74,33 @@ def _is_public_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
     return True
 
 
-async def validate_outbound_url(raw_url: str) -> str:
+async def validate_outbound_url(raw_url: str) -> ValidatedOutboundTarget:
     """
-    严格校验客户端传入的外部服务 Base URL，防止 SSRF：
-    1. 仅允许 https:// 协议
-    2. 禁止 URL 中携带用户名/密码
-    3. 禁止 localhost / 内网域名后缀
-    4. 对字面量 IP 及 DNS 解析出的全部 IP 进行公网地址校验
+    严格校验客户端传入的外部服务 Base URL，防止 SSRF 与 DNS Rebinding：
+    1. 仅允许 https:// 协议，拒绝控制字符/空白
+    2. 禁止 netloc 出现 '@'（拦截 user:pass@ 与空 userinfo）
+    3. 禁止 ?query 与 #fragment
+    4. 显式校验端口（拦截 :0 等非法端口），且端口必须在允许白名单内（默认仅 443）
+    5. 禁止 localhost / 内网域名后缀
+    6. 对字面量 IP 或 DNS 解析出的全部 IP 进行公网地址校验并返回固定 IP 列表
     """
     url = (raw_url or "").strip()
-    if not url or len(url) > 2048:
+    if not url or len(url) > 2048 or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
         raise HTTPException(status_code=400, detail="无效的外部服务地址")
 
     try:
-        parsed = urlparse(url)
+        parsed = urlsplit(url)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的外部服务地址")
 
     if parsed.scheme.lower() != "https":
         raise HTTPException(status_code=400, detail="外部服务地址仅允许使用 HTTPS 协议")
 
-    if parsed.username or parsed.password:
+    if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:
         raise HTTPException(status_code=400, detail="外部服务地址不允许包含认证凭据")
+
+    if parsed.query or parsed.fragment or "?" in url or "#" in url:
+        raise HTTPException(status_code=400, detail="外部服务地址不允许包含查询参数或锚点")
 
     hostname = (parsed.hostname or "").strip().lower().rstrip(".")
     if not hostname:
@@ -71,12 +110,15 @@ async def validate_outbound_url(raw_url: str) -> str:
         raise HTTPException(status_code=400, detail="禁止访问本地或内网服务地址")
 
     try:
-        port = parsed.port or 443
+        raw_port = parsed.port
     except ValueError:
         raise HTTPException(status_code=400, detail="外部服务端口无效")
 
-    if port < 1 or port > 65535:
-        raise HTTPException(status_code=400, detail="外部服务端口无效")
+    port = 443 if raw_port is None else raw_port
+    if port < 1 or port > 65535 or port not in get_allowed_outbound_ports():
+        raise HTTPException(status_code=400, detail="外部服务端口不在允许范围内")
+
+    normalized_url = url.rstrip("/")
 
     # 1. 若主机名本身是 IP 字面量，直接校验
     try:
@@ -87,7 +129,12 @@ async def validate_outbound_url(raw_url: str) -> str:
     if ip_literal is not None:
         if not _is_public_ip(ip_literal):
             raise HTTPException(status_code=400, detail="禁止访问私网、回环或保留 IP 地址")
-        return url.rstrip("/")
+        return ValidatedOutboundTarget(
+            base_url=normalized_url,
+            hostname=hostname,
+            port=port,
+            resolved_ips=(str(ip_literal),),
+        )
 
     # 2. 解析域名对应的全部 IP 并逐一校验
     loop = asyncio.get_running_loop()
@@ -99,6 +146,7 @@ async def validate_outbound_url(raw_url: str) -> str:
     if not addr_infos:
         raise HTTPException(status_code=400, detail="外部服务域名无法解析")
 
+    resolved_ips: list[str] = []
     for info in addr_infos:
         sockaddr = info[4]
         if not sockaddr:
@@ -110,8 +158,93 @@ async def validate_outbound_url(raw_url: str) -> str:
             raise HTTPException(status_code=400, detail="外部服务解析地址无效")
         if not _is_public_ip(resolved_ip):
             raise HTTPException(status_code=400, detail="禁止访问解析到私网或保留 IP 的外部地址")
+        canonical_ip = str(resolved_ip)
+        if canonical_ip not in resolved_ips:
+            resolved_ips.append(canonical_ip)
 
-    return url.rstrip("/")
+    if not resolved_ips:
+        raise HTTPException(status_code=400, detail="外部服务域名无法解析")
+
+    return ValidatedOutboundTarget(
+        base_url=normalized_url,
+        hostname=hostname,
+        port=port,
+        resolved_ips=tuple(resolved_ips),
+    )
+
+
+class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """
+    连接层 IP 固定后端：
+    - 强制把 TCP 连接直接打到预先校验过的公网 IP，彻底杜绝 DNS Rebinding 二次解析
+    - 保留 URL 原始域名供 httpcore 发送 Host 头与执行 TLS SNI 证书校验
+    """
+
+    def __init__(
+        self,
+        pinned_host: str,
+        pinned_ips: tuple[str, ...],
+        allowed_port: int,
+        inner: Optional[httpcore.AsyncNetworkBackend] = None,
+    ):
+        self._pinned_host = pinned_host.strip().lower().rstrip(".")
+        self._pinned_ips = pinned_ips
+        self._allowed_port = allowed_port
+        self._inner = inner or httpcore._backends.auto.AutoBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: Optional[float] = None,
+        local_address: Optional[str] = None,
+        socket_options=None,
+    ):
+        normalized = host.strip().lower().rstrip(".")
+        if normalized != self._pinned_host or port != self._allowed_port:
+            raise httpcore.ConnectError("禁止连接到未校验的目标主机或端口")
+
+        last_exc: Optional[Exception] = None
+        for ip_addr in self._pinned_ips:
+            if not _is_public_ip(ipaddress.ip_address(ip_addr)):
+                raise httpcore.ConnectError("禁止连接到非公网 IP 地址")
+            try:
+                return await self._inner.connect_tcp(
+                    host=ip_addr,
+                    port=port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        raise httpcore.ConnectError("无法连接到目标服务")
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: Optional[float] = None,
+        socket_options=None,
+    ):
+        raise httpcore.ConnectError("禁止连接本地 Unix Socket")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def build_pinned_transport(target: ValidatedOutboundTarget) -> httpx.AsyncHTTPTransport:
+    """构造绑定已校验公网 IP 的 httpx AsyncHTTPTransport（保留原始域名 TLS SNI 与 Host 头）"""
+    transport = httpx.AsyncHTTPTransport()
+    transport._pool._network_backend = PinnedNetworkBackend(
+        pinned_host=target.hostname,
+        pinned_ips=target.resolved_ips,
+        allowed_port=target.port,
+        inner=transport._pool._network_backend,
+    )
+    return transport
 
 
 def mask_url_password(raw_url: str) -> str:

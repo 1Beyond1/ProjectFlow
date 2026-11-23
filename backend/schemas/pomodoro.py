@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 MIN_LOCAL_DATE = date(2020, 1, 1)
@@ -35,6 +35,21 @@ class PomodoroEndRequest(BaseModel):
         if parsed < MIN_LOCAL_DATE or parsed > max_date:
             raise ValueError("日期超出允许范围")
         return value
+
+    @model_validator(mode="after")
+    def validate_end_at_range(self):
+        if self.end_at is not None:
+            base_utc = (
+                self.end_at.astimezone(timezone.utc)
+                if self.end_at.tzinfo is not None
+                else self.end_at.replace(tzinfo=timezone.utc)
+            )
+            offset_min = self.tz_offset_minutes or 0
+            local_date = (base_utc + timedelta(minutes=offset_min)).date()
+            max_date = datetime.now(timezone.utc).date() + timedelta(days=2)
+            if local_date < MIN_LOCAL_DATE or local_date > max_date:
+                raise ValueError("结束时间超出允许范围")
+        return self
 
 
 class PomodoroSummary(BaseModel):
