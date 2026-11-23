@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Modal, StyleSheet, LayoutAnimation, Platform, UIManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLanguageStore } from '../store/useLanguageStore';
+import { formatLocalDate } from '../utils/date';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
     UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -89,8 +90,7 @@ export function MonthPicker({ visible, selectedDate, onSelectDate, onClose, task
     };
 
     const handleJumpToToday = () => {
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0];
+        const todayStr = formatLocalDate(new Date());
         onSelectDate(todayStr);
         onClose();
     };

@@ -7,6 +7,7 @@ import { useTaskStore, Task } from '../../store/useTaskStore';
 import { useLanguageStore } from '../../store/useLanguageStore';
 import { Colors } from '../../constants/Colors';
 import { DateTimeWheelPicker } from '../../components/DateTimeWheelPicker';
+import { formatLocalDate } from '../../utils/date';
 
 export default function EventsManagementScreen() {
     const insets = useSafeAreaInsets();
@@ -70,7 +71,7 @@ export default function EventsManagementScreen() {
                     }
                 } else {
                     const now = new Date();
-                    setEditDate(now.toISOString().split('T')[0]);
+                    setEditDate(formatLocalDate(now));
                     setEditTime('09:00');
                     setHasTime(false);
                 }

@@ -2,11 +2,13 @@
  * API 服务模块
  * 所有后端 API 调用都通过此模块
  */
+import { Platform } from 'react-native';
 import { useConfigStore } from '../store/useConfigStore';
 import { useDebugStore, ProcessingPhase } from '../store/useDebugStore';
 import { useLanguageStore } from '../store/useLanguageStore';
 import { useAuthStore } from '../store/useAuthStore';
 import { useDialogStore } from '../store/useDialogStore';
+import { formatLocalDateTime } from '../utils/date';
 
 const containsCjk = (value: string) => /[\u4e00-\u9fff]/.test(value);
 
@@ -20,15 +22,26 @@ const sanitizeServerMessage = (message: string, t: (key: string) => string, lang
 // 当前请求的控制器
 let currentAbortController: AbortController | null = null;
 
-const getClientTime = () => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+const getClientTime = () => formatLocalDateTime(new Date());
+
+const appendFileToFormData = async (
+    formData: FormData,
+    fieldName: string,
+    uri: string,
+    fileName: string,
+    fileType: string
+) => {
+    if (Platform.OS === 'web') {
+        const res = await fetch(uri);
+        const blob = await res.blob();
+        formData.append(fieldName, blob, fileName);
+    } else {
+        formData.append(fieldName, {
+            uri,
+            name: fileName,
+            type: fileType,
+        } as any);
+    }
 };
 
 /**
@@ -68,10 +81,11 @@ const handleBannedResponse = (payload: any, t: (key: string) => string) => {
 };
 
 const parseErrorPayload = async (response: Response) => {
+    const text = await response.text();
+    if (!text) return {};
     try {
-        return await response.json();
+        return JSON.parse(text);
     } catch {
-        const text = await response.text();
         return { detail: text };
     }
 };
@@ -199,11 +213,7 @@ export const processAudio = async (uri: string): Promise<ProcessAudioResponse> =
         debug.addLog(`${t('api.log.fileReadyPrefix')}${fileName} (${fileType})`);
 
         const formData = new FormData();
-        formData.append('file', {
-            uri: uri,
-            name: fileName,
-            type: fileType,
-        } as any);
+        await appendFileToFormData(formData, 'file', uri, fileName, fileType);
 
         debug.setProgress(30);
         debug.addLog(t('api.log.sendingRequest'));
@@ -214,24 +224,27 @@ export const processAudio = async (uri: string): Promise<ProcessAudioResponse> =
             if (current < 80) debug.setProgress(current + 5);
         }, 500);
 
-        const response = await fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-audio`, {
-            method: 'POST',
-            signal: currentAbortController.signal,
-            headers: {
-                'Accept': 'application/json',
-                'X-STT-Base-Url': sttBaseUrl,
-                'X-STT-Key': sttApiKey,
-                'X-STT-Model': sttModel,
-                'X-LLM-Base-Url': llmBaseUrl,
-                'X-LLM-Key': llmApiKey,
-                'X-LLM-Model': llmModel,
-                'X-Device-ID': deviceId || 'unknown-device',
-                'X-Client-Time': getClientTime(),
-            } as Record<string, string>,
-            body: formData,
-        });
-
-        clearInterval(progressInterval);
+        let response: Response;
+        try {
+            response = await fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-audio`, {
+                method: 'POST',
+                signal: currentAbortController.signal,
+                headers: {
+                    'Accept': 'application/json',
+                    'X-STT-Base-Url': sttBaseUrl,
+                    'X-STT-Key': sttApiKey,
+                    'X-STT-Model': sttModel,
+                    'X-LLM-Base-Url': llmBaseUrl,
+                    'X-LLM-Key': llmApiKey,
+                    'X-LLM-Model': llmModel,
+                    'X-Device-ID': deviceId || 'unknown-device',
+                    'X-Client-Time': getClientTime(),
+                } as Record<string, string>,
+                body: formData,
+            });
+        } finally {
+            clearInterval(progressInterval);
+        }
 
         if (!response.ok) {
             const payload = await parseErrorPayload(response);
@@ -320,22 +333,25 @@ export const processText = async (text: string): Promise<ProcessAudioResponse> =
             if (current < 90) debug.setProgress(current + 10);
         }, 300);
 
-        const response = await fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-text`, {
-            method: 'POST',
-            signal: currentAbortController.signal,
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'X-LLM-Base-Url': llmBaseUrl,
-                'X-LLM-Key': llmApiKey,
-                'X-LLM-Model': llmModel,
-                'X-Device-ID': deviceId || 'unknown-device',
-                'X-Client-Time': getClientTime(),
-            } as Record<string, string>,
-            body: JSON.stringify({ text }),
-        });
-
-        clearInterval(progressInterval);
+        let response: Response;
+        try {
+            response = await fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-text`, {
+                method: 'POST',
+                signal: currentAbortController.signal,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-LLM-Base-Url': llmBaseUrl,
+                    'X-LLM-Key': llmApiKey,
+                    'X-LLM-Model': llmModel,
+                    'X-Device-ID': deviceId || 'unknown-device',
+                    'X-Client-Time': getClientTime(),
+                } as Record<string, string>,
+                body: JSON.stringify({ text }),
+            });
+        } finally {
+            clearInterval(progressInterval);
+        }
 
         if (!response.ok) {
             const payload = await parseErrorPayload(response);
@@ -391,11 +407,7 @@ export const processImage = async (uri: string): Promise<ProcessAudioResponse> =
 
         const fileName = uri.split('/').pop() || 'image.jpg';
         const formData = new FormData();
-        formData.append('file', {
-            uri,
-            name: fileName,
-            type: 'image/jpeg',
-        } as any);
+        await appendFileToFormData(formData, 'file', uri, fileName, 'image/jpeg');
 
         debug.setProgress(30);
         debug.addLog(t('api.log.sendingRequest') || 'Sending request...');
@@ -403,25 +415,34 @@ export const processImage = async (uri: string): Promise<ProcessAudioResponse> =
         // Create a timeout signal
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+        let raceTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
-        const fetchPromise = fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-image`, {
-            method: 'POST',
-            signal: controller.signal, // Use local controller for timeout
-            headers: {
-                'Accept': 'application/json',
-                'X-Vision-Model': visionModel,
-                'X-Device-ID': deviceId || 'unknown-device',
-            } as Record<string, string>,
-            body: formData,
-        });
+        let response: Response;
+        try {
+            const fetchPromise = fetchWithAuth(`${apiUrl.replace(/\/$/, '')}/api/process-image`, {
+                method: 'POST',
+                signal: controller.signal, // Use local controller for timeout
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Vision-Model': visionModel,
+                    'X-Device-ID': deviceId || 'unknown-device',
+                } as Record<string, string>,
+                body: formData,
+            });
 
-        const timeoutPromise = new Promise<Response>((_, reject) =>
-            setTimeout(() => reject(new Error(t('api.error.requestTimeout') || 'Request timed out')), 60000)
-        );
+            const timeoutPromise = new Promise<Response>((_, reject) => {
+                raceTimeoutId = setTimeout(
+                    () => reject(new Error(t('api.error.requestTimeout') || 'Request timed out')),
+                    60000
+                );
+            });
 
-        // Race between fetch and timeout
-        const response = await Promise.race([fetchPromise, timeoutPromise]);
-        clearTimeout(timeoutId);
+            // Race between fetch and timeout
+            response = await Promise.race([fetchPromise, timeoutPromise]);
+        } finally {
+            clearTimeout(timeoutId);
+            if (raceTimeoutId) clearTimeout(raceTimeoutId);
+        }
 
         debug.setProgress(70);
         debug.addLog(t('api.log.responseParsing') || 'Parsing response...');
@@ -564,9 +585,9 @@ export const pomodoroEnd = async (session_id: string, duration_sec: number, stat
             body.local_date = local_date;
             body.local_hour = local_hour;
         } else {
-            // 否则传 UTC 和 offset
+            // 否则传 UTC 和东区为正的时区偏移（如 UTC+8 为 +480）
             body.end_at = new Date().toISOString();
-            body.tz_offset_minutes = new Date().getTimezoneOffset();
+            body.tz_offset_minutes = -new Date().getTimezoneOffset();
         }
 
         const response = await fetchWithAuth(`${config.apiUrl.replace(/\/$/, '')}/api/pomodoro/end`, {

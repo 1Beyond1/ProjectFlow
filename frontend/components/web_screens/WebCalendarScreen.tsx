@@ -8,6 +8,7 @@ import { useLanguageStore } from '../../store/useLanguageStore';
 import { WebHomeLayout } from '../../components/web/WebHomeLayout';
 import { useBanCheck } from '../../hooks/useBanCheck';
 import { useDialogStore } from '../../store/useDialogStore';
+import { formatLocalDateTime } from '../../utils/date';
 
 export default function WebCalendarScreen() {
     const { getTasksByDate, getAllTaskDates, deleteTask, addTask, getHomePageTasks } = useTaskStore();
@@ -68,7 +69,7 @@ export default function WebCalendarScreen() {
                 addTask({
                     title,
                     priority: 'normal',
-                    timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+                    timestamp: formatLocalDateTime(new Date()),
                     subtasks: []
                 });
             }

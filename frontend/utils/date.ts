@@ -1,6 +1,21 @@
 /**
- * 日期工具函数
+ * 日期工具函数（统一使用设备本地时区，避免 toISOString 导致东八区日期偏移）
  */
+
+export const formatLocalDate = (date: Date = new Date()): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+export const formatLocalDateTime = (date: Date = new Date()): string => {
+    const datePart = formatLocalDate(date);
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${datePart} ${hours}:${minutes}:${seconds}`;
+};
 
 export const formatFriendlyDate = (dateString?: string): string => {
     if (!dateString) return '';
@@ -25,13 +40,9 @@ export const formatFriendlyDate = (dateString?: string): string => {
             case 1: return '明天';
             case 2: return '后天';
             default:
-                // 返回 YYYY-MM-DD
-                const y = targetDate.getFullYear();
-                const m = (targetDate.getMonth() + 1).toString().padStart(2, '0');
-                const d = targetDate.getDate().toString().padStart(2, '0');
-                return `${y}-${m}-${d}`;
+                return formatLocalDate(targetDate);
         }
-    } catch (e) {
+    } catch {
         return dateString;
     }
 };

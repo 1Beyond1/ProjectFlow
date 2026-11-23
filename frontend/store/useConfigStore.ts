@@ -27,6 +27,9 @@ export interface ConfigState {
     // 设备标识
     deviceId: string;
 
+    // 持久化水合状态（非持久化字段）
+    _hasHydrated: boolean;
+
     // Actions
     setApiUrl: (url: string) => void;
     // STT Actions
@@ -40,12 +43,13 @@ export interface ConfigState {
     setVisionModel: (model: string) => void;
 
     setDeviceId: (id: string) => void;
+    setHasHydrated: (hydrated: boolean) => void;
     resetConfig: () => void;
 }
 
-// 默认配置
+// 默认配置（支持 EXPO_PUBLIC_API_URL 环境变量，回退本地地址）
 const defaultConfig = {
-    apiUrl: 'http://192.168.31.45:8000',
+    apiUrl: process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000',
 
     sttBaseUrl: 'https://api.siliconflow.cn/v1',
     sttApiKey: '',
@@ -62,10 +66,11 @@ const defaultConfig = {
 
 export const useConfigStore = create<ConfigState>()(
     persist(
-        (set) => ({
+        (set, get) => ({
             ...defaultConfig,
+            _hasHydrated: false,
 
-            setApiUrl: (url) => set({ apiUrl: url }),
+            setApiUrl: (url) => set({ apiUrl: url.trim().replace(/\/$/, '') }),
 
             setSttBaseUrl: (url) => set({ sttBaseUrl: url }),
             setSttApiKey: (key) => set({ sttApiKey: key }),
@@ -77,12 +82,31 @@ export const useConfigStore = create<ConfigState>()(
             setVisionModel: (model) => set({ visionModel: model }),
 
             setDeviceId: (id) => set({ deviceId: id }),
+            setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
 
-            resetConfig: () => set(defaultConfig),
+            resetConfig: () => set({
+                ...defaultConfig,
+                deviceId: get().deviceId,
+                _hasHydrated: true,
+            }),
         }),
         {
             name: 'project-flow-config-v2', // 升级存储 key 以避免冲突
             storage: createJSONStorage(() => AsyncStorage),
+            partialize: (state) => ({
+                apiUrl: state.apiUrl,
+                sttBaseUrl: state.sttBaseUrl,
+                sttApiKey: state.sttApiKey,
+                sttModel: state.sttModel,
+                llmBaseUrl: state.llmBaseUrl,
+                llmApiKey: state.llmApiKey,
+                llmModel: state.llmModel,
+                visionModel: state.visionModel,
+                deviceId: state.deviceId,
+            }),
+            onRehydrateStorage: () => (state) => {
+                state?.setHasHydrated(true);
+            },
         }
     )
 );

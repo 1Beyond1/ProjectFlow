@@ -30,7 +30,7 @@ export const useStatsData = () => {
 
     useEffect(() => {
         // Security Check: If banned, redirect immediately
-        if (user?.status === 'banned') {
+        if (user?.is_banned === 1 || user?.is_banned === true || user?.status === 'banned') {
             logout();
             router.replace('/');
             return;

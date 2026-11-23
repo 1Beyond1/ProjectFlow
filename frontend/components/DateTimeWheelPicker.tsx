@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { View, Text, ScrollView, NativeSyntheticEvent, NativeScrollEvent, StyleSheet } from 'react-native';
+import { formatLocalDate } from '../utils/date';
 
 interface DateTimeWheelPickerProps {
     value: string; // "YYYY-MM-DD" or "HH:MM" or "YYYY-MM-DD HH:MM"
@@ -17,7 +18,7 @@ export function DateTimeWheelPicker({ value, mode = 'datetime', onChange }: Date
     const [datePart, timePart] = value.includes(' ') ? value.split(' ') : (mode === 'time' ? ['', value] : [value, '']);
 
     // Defaults
-    const defaultDate = new Date().toISOString().split('T')[0];
+    const defaultDate = formatLocalDate(new Date());
     const defaultTime = '09:00';
 
     const [yStr, mStr, dStr] = (datePart || defaultDate).split('-');

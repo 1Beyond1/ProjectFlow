@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { formatLocalDate } from '../utils/date';
 
 export interface Task {
     id: string;
@@ -151,9 +152,7 @@ export const useTaskStore = create<TaskState>()(
 
             // Calendar helpers
             getTodayTasksWithTime: () => {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+                const todayStr = formatLocalDate(new Date()); // 本地 YYYY-MM-DD
 
                 return get().todayTasks.filter(task => {
                     if (!task.timestamp) return false;
@@ -179,9 +178,7 @@ export const useTaskStore = create<TaskState>()(
             },
 
             getHomePageTasks: () => {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                const todayStr = today.toISOString().split('T')[0];
+                const todayStr = formatLocalDate(new Date());
 
                 // 1. Find overdue tasks (date < today && !completed)
                 // We need to iterate all todayTasks (which functions as "all current active tasks" in this simple store?)

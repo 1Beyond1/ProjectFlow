@@ -8,6 +8,7 @@ import { useLanguageStore } from '../../store/useLanguageStore';
 import { Sidebar } from '../../components/web/Sidebar'; // Reuse Sidebar
 import { useBanCheck } from '../../hooks/useBanCheck';
 import { useDialogStore } from '../../store/useDialogStore';
+import { formatLocalDateTime } from '../../utils/date';
 
 type FilterType = 'Inbox' | 'Personal' | 'Work' | 'Ideas' | 'Projects';
 
@@ -82,7 +83,7 @@ export default function WebTasksScreen() {
             addTask({
                 title: newTaskText,
                 priority: 'normal',
-                timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19)
+                timestamp: formatLocalDateTime(new Date())
             });
             setNewTaskText('');
         }

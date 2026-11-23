@@ -11,6 +11,8 @@ import { Colors } from '../../constants/Colors';
 import Svg, { Circle } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
 import WebStatsScreen from '../../components/web_screens/WebStatsScreen';
+import { fetchWithAuth } from '../../services/api';
+import { formatLocalDate } from '../../utils/date';
 
 type Period = 'weekly' | 'monthly';
 
@@ -55,8 +57,8 @@ const MobileStatsScreen = () => {
         }
 
         return {
-            startDate: start.toISOString().split('T')[0],
-            endDate: end.toISOString().split('T')[0],
+            startDate: formatLocalDate(start),
+            endDate: formatLocalDate(end),
             dateRange: range
         };
     }, [period]);
@@ -65,8 +67,8 @@ const MobileStatsScreen = () => {
     const periodTasks = useMemo(() => {
         return todayTasks.filter((task: any) => {
             if (!task.timestamp) return false;
-            const taskDate = new Date(task.timestamp.split(' ')[0]);
-            return taskDate >= new Date(startDate) && taskDate <= new Date(endDate);
+            const taskDateStr = task.timestamp.split(' ')[0];
+            return taskDateStr >= startDate && taskDateStr <= endDate;
         });
     }, [todayTasks, startDate, endDate]);
 
@@ -82,14 +84,15 @@ const MobileStatsScreen = () => {
 
     // Calculate daily stats for chart
     const dailyStats = useMemo(() => {
+        const todayStr = formatLocalDate(new Date());
         if (period === 'weekly') {
             return dateRange.map(date => {
-                const dateStr = date.toISOString().split('T')[0];
+                const dateStr = formatLocalDate(date);
                 const dayTasks = periodTasks.filter(t => t.timestamp?.startsWith(dateStr));
                 const completed = dayTasks.filter(t => t.completed).length;
                 const uncompleted = dayTasks.length - completed;
                 const dayLabel = date.toLocaleDateString('en-US', { weekday: 'short' })[0];
-                const isToday = dateStr === new Date().toISOString().split('T')[0];
+                const isToday = dateStr === todayStr;
 
                 return { date: dateStr, completed, uncompleted, dayLabel, isToday };
             });
@@ -101,21 +104,25 @@ const MobileStatsScreen = () => {
             for (let i = 0; i < dateRange.length; i += weekSize) {
                 const weekDates = dateRange.slice(i, i + weekSize);
                 const weekTasks = weekDates.flatMap(date => {
-                    const dateStr = date.toISOString().split('T')[0];
+                    const dateStr = formatLocalDate(date);
                     return periodTasks.filter(t => t.timestamp?.startsWith(dateStr));
                 });
 
                 const completed = weekTasks.filter(t => t.completed).length;
                 const uncompleted = weekTasks.length - completed;
                 const dayLabel = `W${Math.floor(i / weekSize) + 1}`;
-                const isToday = weekDates.some(d => d.toISOString().split('T')[0] === new Date().toISOString().split('T')[0]);
+                const isToday = weekDates.some(d => formatLocalDate(d) === todayStr);
 
-                weeks.push({ date: weekDates[0].toISOString().split('T')[0], completed, uncompleted, dayLabel, isToday });
+                weeks.push({ date: formatLocalDate(weekDates[0]), completed, uncompleted, dayLabel, isToday });
             }
 
             return weeks;
         }
     }, [dateRange, periodTasks, period]);
+
+    const maxDailyTotal = useMemo(() => {
+        return Math.max(1, ...dailyStats.map(d => d.completed + d.uncompleted));
+    }, [dailyStats]);
 
     const currentAnalysis = period === 'weekly' ? weeklyAnalysis : monthlyAnalysis;
 
@@ -123,11 +130,11 @@ const MobileStatsScreen = () => {
         setIsAnalyzing(true);
 
         try {
-            const response = await fetch(`${useConfigStore.getState().apiUrl}/api/analyze-tasks`, {
+            const apiUrl = useConfigStore.getState().apiUrl.replace(/\/$/, '');
+            const response = await fetchWithAuth(`${apiUrl}/api/analyze-tasks`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${useAuthStore.getState().accessToken}`,
                 },
                 body: JSON.stringify({
                     tasks: periodTasks.map((t: any) => ({
@@ -416,8 +423,8 @@ const MobileStatsScreen = () => {
                     <View style={{ flexDirection: 'row', alignItems: 'stretch', justifyContent: 'space-between', height: 208, gap: period === 'weekly' ? 12 : 4 }}>
                         {dailyStats.map((day, i) => {
                             const maxHeight = period === 'weekly' ? 100 : 50;
-                            const completedHeight = Math.max((day.completed / Math.max(...dailyStats.map(d => d.completed + d.uncompleted))) * maxHeight, 0);
-                            const uncompletedHeight = Math.max((day.uncompleted / Math.max(...dailyStats.map(d => d.completed + d.uncompleted))) * maxHeight, 0);
+                            const completedHeight = Math.max((day.completed / maxDailyTotal) * maxHeight, 0);
+                            const uncompletedHeight = Math.max((day.uncompleted / maxDailyTotal) * maxHeight, 0);
 
                             return (
                                 <View key={i} style={{ flex: 1, flexDirection: 'column', alignItems: 'center' }}>
@@ -478,7 +485,7 @@ const MobileStatsScreen = () => {
                                                 height: '100%',
                                                 borderRadius: 4,
                                                 backgroundColor: cat.color,
-                                                width: `${(cat.count / periodTasks.length) * 100}%`
+                                                width: `${periodTasks.length > 0 ? Math.min(100, (cat.count / periodTasks.length) * 100) : 0}%`
                                             }}
                                         />
                                     </View>

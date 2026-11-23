@@ -9,16 +9,22 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Colors } from '../constants/Colors';
 import { AppDialog } from '../components/AppDialog';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useConfigStore } from '../store/useConfigStore';
 import { generateUUID } from '../utils/uuid';
 import { fetchModels } from '../services/api';
 
 export default function RootLayout() {
-    const { deviceId, setDeviceId } = useConfigStore();
+    const hasHydrated = useConfigStore((state) => state._hasHydrated);
+    const initializedRef = useRef(false);
 
     useEffect(() => {
+        // 等待 Zustand persist 从 AsyncStorage 完成水合后再初始化 deviceId，避免覆盖持久化值
+        if (!hasHydrated || initializedRef.current) return;
+        initializedRef.current = true;
+
         const init = async () => {
+            const { deviceId, setDeviceId } = useConfigStore.getState();
             let currentId = deviceId;
             if (!currentId) {
                 currentId = generateUUID();
@@ -28,18 +34,14 @@ export default function RootLayout() {
                 console.log('📱 Current Device ID:', currentId);
             }
 
-            // 立即调用一次 API 以注册设备 ID 到后端
-            // 使用 setTimeout 稍微延迟一下确保 store 更新（虽然在这里 async 应该没问题）
-            setTimeout(() => {
-                console.log('🌐 Registering device with backend...');
-                fetchModels().then((data: any) => {
-                    if (data) console.log('✅ Device registered, limits:', data.limits);
-                });
-            }, 1000);
+            console.log('🌐 Registering device with backend...');
+            fetchModels().then((data: any) => {
+                if (data) console.log('✅ Device registered, limits:', data.limits);
+            });
         };
 
         init();
-    }, []);
+    }, [hasHydrated]);
 
     return (
         <SafeAreaProvider style={{ flex: 1 }}>

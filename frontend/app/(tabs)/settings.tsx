@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, LayoutAnimation, UIManager } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, LayoutAnimation, UIManager } from 'react-native';
 import { useConfigStore } from '../../store/useConfigStore';
 import { useTaskStore } from '../../store/useTaskStore';
 import { useDebugStore, ProcessingPhase } from '../../store/useDebugStore';
@@ -53,8 +53,13 @@ export default function SettingsScreen() {
     const [loading, setLoading] = useState(false);
     const [modelData, setModelData] = useState<ModelResponse | null>(null);
     const [isModelLoading, setModelLoading] = useState(false);
+    const [apiUrlInput, setApiUrlInput] = useState(config.apiUrl);
     // 开发者选项折叠状态
     const [isDeveloperExpanded, setDeveloperExpanded] = useState(false);
+
+    useEffect(() => {
+        setApiUrlInput(config.apiUrl);
+    }, [config.apiUrl]);
 
     const toggleDeveloperPanel = () => {
         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -183,6 +188,16 @@ export default function SettingsScreen() {
     };
 
     const handleSave = () => {
+        const trimmedUrl = apiUrlInput.trim().replace(/\/$/, '');
+        if (!trimmedUrl || !/^https?:\/\/.+/i.test(trimmedUrl)) {
+            showDialog({
+                title: t('common.error'),
+                message: t('settings.api.invalidUrl'),
+                actions: [{ label: t('common.confirm'), variant: 'primary' }],
+            });
+            return;
+        }
+        config.setApiUrl(trimmedUrl);
         showDialog({
             title: t('settings.alert.save.title'),
             message: t('settings.alert.save.message'),
@@ -426,17 +441,24 @@ export default function SettingsScreen() {
                                 <Ionicons name="chevron-forward" size={20} color={Colors.textSubtle} />
                             </TouchableOpacity>
 
-                            {/* 后端服务配置 (只读) */}
+                            {/* 后端服务配置 (支持编辑保存 apiUrl) */}
                             <View className="bg-white p-4 rounded-2xl shadow-sm border border-[#E6E1D6]">
                                 <View className="flex-row items-center mb-4">
                                     <Ionicons name="server-outline" size={24} color={Colors.primary} />
                                     <Text className="text-lg font-semibold text-[#2C2420] ml-2">{t('settings.developer.backendInfo')}</Text>
                                 </View>
                                 <View className="bg-[#F8F6F1] p-4 rounded-xl mb-4">
-                                    <View className="flex-row justify-between mb-2">
-                                        <Text className="text-[#8C847E]">{t('settings.api.url')}</Text>
-                                        <Text className="font-mono text-[#2C2420]">{config.apiUrl || t('common.unset')}</Text>
-                                    </View>
+                                    <Text className="text-[#8C847E] mb-2">{t('settings.api.url')}</Text>
+                                    <TextInput
+                                        className="bg-white px-3 py-2.5 rounded-xl font-mono text-sm text-[#2C2420] border border-[#E6E1D6]"
+                                        value={apiUrlInput}
+                                        onChangeText={setApiUrlInput}
+                                        placeholder="http://localhost:8000"
+                                        placeholderTextColor="#B0B0B0"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                        keyboardType="url"
+                                    />
                                     <Text className="text-xs text-[#DA5D35] mt-2">
                                         {t('settings.developer.backendInfo.note')}
                                     </Text>

@@ -1,6 +1,6 @@
 /**
  * 用户认证状态管理
- * 管理登录状态、用户信息和 Token
+ * 管理登录状态、用户信息和 Token（含 singleflight 刷新锁与有限重试保护）
  */
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
@@ -26,11 +26,16 @@ const translateAuthDetail = (
         '请提供用户名或 UID': t('auth.error.missingIdentifier'),
         '用户不存在': t('auth.error.userNotFound'),
         '密码错误': t('auth.error.passwordInvalid'),
+        '用户名或密码错误': t('auth.error.invalidCredentials'),
     };
     if (map[detail]) return map[detail];
     if (containsCjk(detail)) return t(fallbackKey);
     return detail;
 };
+
+// Singleflight 刷新锁，避免并发 401 触发多次 /auth/refresh 导致旧令牌重放被吊销
+let refreshPromise: Promise<boolean> | null = null;
+const MAX_FETCH_USER_RETRIES = 1;
 
 export interface User {
     uid: number;
@@ -39,6 +44,7 @@ export interface User {
     avatar_url: string | null;
     tier: 'free' | 'vip';
     daily_usage?: number;
+    is_banned?: number | boolean;
     status?: string;
 }
 
@@ -78,7 +84,7 @@ export const useAuthStore = create<AuthState>()(
                 try {
                     const { t, language } = useLanguageStore.getState();
                     const configStore = useConfigStore.getState();
-                    const apiUrl = configStore.apiUrl;
+                    const apiUrl = configStore.apiUrl.replace(/\/$/, '');
                     const deviceId = configStore.deviceId;
 
                     const normalizedInput = typeof usernameOrUid === 'string'
@@ -102,10 +108,10 @@ export const useAuthStore = create<AuthState>()(
                         ),
                     });
 
-                    const data = await response.json();
+                    const data = await response.json().catch(() => ({}));
 
                     if (!response.ok) {
-                        if (response.status === 403 && data?.detail === '账户已被封禁') {
+                        if (response.status === 403 && (data?.code === 'ACCOUNT_BANNED' || data?.detail === '账户已被封禁')) {
                             useDialogStore.getState().showDialog({
                                 title: t('alert.accountBanned.title'),
                                 message: t('alert.accountBanned.message'),
@@ -147,7 +153,7 @@ export const useAuthStore = create<AuthState>()(
                 try {
                     const { t, language } = useLanguageStore.getState();
                     const configStore = useConfigStore.getState();
-                    const apiUrl = configStore.apiUrl;
+                    const apiUrl = configStore.apiUrl.replace(/\/$/, '');
                     const deviceId = configStore.deviceId;
 
                     const response = await fetch(`${apiUrl}/auth/register`, {
@@ -164,7 +170,7 @@ export const useAuthStore = create<AuthState>()(
                         }),
                     });
 
-                    const data = await response.json();
+                    const data = await response.json().catch(() => ({}));
 
                     if (!response.ok) {
                         const detail = typeof data.detail === 'string'
@@ -195,6 +201,9 @@ export const useAuthStore = create<AuthState>()(
             },
 
             logout: () => {
+                const token = get().accessToken;
+                const apiUrl = useConfigStore.getState().apiUrl?.replace(/\/$/, '');
+
                 set({
                     user: null,
                     accessToken: null,
@@ -202,6 +211,18 @@ export const useAuthStore = create<AuthState>()(
                     isLoggedIn: false,
                     error: null,
                 });
+
+                // 尽力通知后端吊销 Refresh Token，不阻塞本地登出
+                if (token && apiUrl) {
+                    fetch(`${apiUrl}/auth/logout`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                        },
+                    }).catch(() => {
+                        // ignore network error during logout cleanup
+                    });
+                }
             },
 
             setUser: (user) => set({ user, isLoggedIn: !!user }),
@@ -214,82 +235,99 @@ export const useAuthStore = create<AuthState>()(
             clearError: () => set({ error: null }),
 
             fetchUserInfo: async () => {
-                const { accessToken } = get();
-                if (!accessToken) return;
+                const runFetch = async (attempt: number): Promise<void> => {
+                    const { accessToken } = get();
+                    if (!accessToken) return;
 
-                try {
-                    const apiUrl = useConfigStore.getState().apiUrl;
-                    const t = useLanguageStore.getState().t;
-                    const response = await fetch(`${apiUrl}/auth/me`, {
-                        headers: {
-                            'Authorization': `Bearer ${accessToken}`,
-                        },
-                    });
+                    try {
+                        const apiUrl = useConfigStore.getState().apiUrl.replace(/\/$/, '');
+                        const t = useLanguageStore.getState().t;
+                        const response = await fetch(`${apiUrl}/auth/me`, {
+                            headers: {
+                                'Authorization': `Bearer ${accessToken}`,
+                            },
+                        });
 
-                    if (response.ok) {
-                        const user = await response.json();
-                        set({ user, isLoggedIn: true });
-                    } else if (response.status === 401) {
-                        // Token 过期，尝试刷新
-                        const refreshed = await get().refreshAccessToken();
-                        if (refreshed) {
-                            // 刷新成功，重新获取用户信息
-                            return await get().fetchUserInfo();
-                        }
-                        // 刷新失败，登出已在 refreshAccessToken 中处理
-                    } else if (response.status === 403) {
-                        try {
-                            const payload = await response.json();
-                            if (payload?.code === 'ACCOUNT_BANNED' || payload?.detail === '账户已被封禁') {
-                                useDialogStore.getState().showDialog({
-                                    title: t('alert.accountBanned.title'),
-                                    message: t('alert.accountBanned.message'),
-                                    actions: [{ label: t('common.confirm'), variant: 'primary' }],
-                                });
+                        if (response.ok) {
+                            const user = await response.json();
+                            set({ user, isLoggedIn: true });
+                        } else if (response.status === 401) {
+                            if (attempt >= MAX_FETCH_USER_RETRIES) {
+                                get().logout();
+                                return;
                             }
-                        } catch {
-                            // ignore parse errors
+                            const refreshed = await get().refreshAccessToken();
+                            if (refreshed) {
+                                return await runFetch(attempt + 1);
+                            }
+                        } else if (response.status === 403) {
+                            try {
+                                const payload = await response.json();
+                                if (payload?.code === 'ACCOUNT_BANNED' || payload?.detail === '账户已被封禁') {
+                                    useDialogStore.getState().showDialog({
+                                        title: t('alert.accountBanned.title'),
+                                        message: t('alert.accountBanned.message'),
+                                        actions: [{ label: t('common.confirm'), variant: 'primary' }],
+                                    });
+                                }
+                            } catch {
+                                // ignore parse errors
+                            }
+                            get().logout();
+                        } else {
+                            // 非 401/403（如 5xx 临时故障）不强制登出用户
+                            console.warn('获取用户信息返回非认证错误:', response.status);
                         }
-                        get().logout();
-                    } else {
-                        // 其他错误，直接登出
-                        get().logout();
+                    } catch (e) {
+                        console.error('获取用户信息失败:', e);
                     }
-                } catch (e) {
-                    console.error('获取用户信息失败:', e);
-                }
+                };
+
+                return runFetch(0);
             },
 
             refreshAccessToken: async () => {
+                if (refreshPromise) {
+                    return refreshPromise;
+                }
+
                 const { refreshToken } = get();
                 if (!refreshToken) return false;
 
-                try {
-                    const apiUrl = useConfigStore.getState().apiUrl;
-                    const response = await fetch(`${apiUrl}/auth/refresh`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ refresh_token: refreshToken }),
-                    });
+                refreshPromise = (async () => {
+                    try {
+                        const apiUrl = useConfigStore.getState().apiUrl.replace(/\/$/, '');
+                        const response = await fetch(`${apiUrl}/auth/refresh`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ refresh_token: refreshToken }),
+                        });
 
-                    if (!response.ok) {
-                        // Refresh token 也无效，需要重新登录
-                        get().logout();
+                        if (!response.ok) {
+                            // 仅在 401/403 明确认证失败时登出，避免临时 5xx 误清会话
+                            if (response.status === 401 || response.status === 403) {
+                                get().logout();
+                            }
+                            return false;
+                        }
+
+                        const data = await response.json();
+                        set({
+                            user: data.user,
+                            accessToken: data.access_token,
+                            refreshToken: data.refresh_token,
+                            isLoggedIn: true,
+                        });
+                        return true;
+                    } catch (e) {
+                        console.error('Token 刷新失败:', e);
                         return false;
+                    } finally {
+                        refreshPromise = null;
                     }
+                })();
 
-                    const data = await response.json();
-                    set({
-                        user: data.user,
-                        accessToken: data.access_token,
-                        refreshToken: data.refresh_token,
-                        isLoggedIn: true,
-                    });
-                    return true;
-                } catch (e) {
-                    console.error('Token 刷新失败:', e);
-                    return false;
-                }
+                return refreshPromise;
             },
         }),
         {

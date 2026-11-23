@@ -184,6 +184,9 @@ export function VoiceInputBar() {
 
         try {
             const result = await processText(text);
+            if (!result.success && result.error !== 'Request cancelled') {
+                setTextInput(text); // 业务或网络失败时恢复用户输入
+            }
             handleResult(result, 'text');
         } catch (error) {
             const errorMessage = error instanceof Error ? sanitizeServerMessage(error.message) : t('alert.textProcessFailed');

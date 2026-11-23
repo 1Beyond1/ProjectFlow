@@ -18,6 +18,7 @@ import { useTaskStore } from '../../store/useTaskStore';
 import { useLanguageStore } from '../../store/useLanguageStore';
 import { DayTaskView } from '../../components/DayTaskView';
 import WebCalendarScreen from '../../components/web_screens/WebCalendarScreen';
+import { formatLocalDate } from '../../utils/date';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
@@ -48,10 +49,7 @@ const MobileCalendarScreen = () => {
     const [pickerVisible, setPickerVisible] = useState(false);
 
     // 选中的日期，默认今天
-    const [selectedDate, setSelectedDate] = useState(() => {
-        const today = new Date();
-        return today.toISOString().split('T')[0]; // YYYY-MM-DD
-    });
+    const [selectedDate, setSelectedDate] = useState(() => formatLocalDate(new Date()));
 
     // Generate date range (±365 days)
     const dateList = useMemo(() => {
@@ -63,14 +61,14 @@ const MobileCalendarScreen = () => {
         for (let i = 0; i < 730; i++) { // 2 years total
             const d = new Date(start);
             d.setDate(d.getDate() + i);
-            list.push(d.toISOString().split('T')[0]);
+            list.push(formatLocalDate(d));
         }
         return list;
     }, []);
 
     // Find initial index
     const initialIndex = useMemo(() => {
-        const today = new Date().toISOString().split('T')[0];
+        const today = formatLocalDate(new Date());
         const idx = dateList.findIndex(d => d === today);
         return idx >= 0 ? idx : 0;
     }, [dateList]);
@@ -142,7 +140,7 @@ const MobileCalendarScreen = () => {
                 <View className="flex-row items-center justify-end gap-3">
                     <Pressable
                         onPress={() => {
-                            const today = new Date().toISOString().split('T')[0];
+                            const today = formatLocalDate(new Date());
                             handleDateSelect(today);
                         }}
                         className="px-3 py-1.5 rounded-full bg-[#171312] dark:bg-white active:opacity-80"
