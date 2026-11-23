@@ -1,22 +1,24 @@
-version: "3.8"
-
 services:
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: flow-backend
-    restart: always
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./backend:/app
+      # 仅只读挂载运行时配置，避免将源码目录读写暴露到容器
+      - ./backend/config.json:/app/config.json:ro
     environment:
-      - DATABASE_URL=mysql+aiomysql://root:${MYSQL_PASSWORD}@host.docker.internal:3306/project_flow
-      - REDIS_URL=redis://host.docker.internal:6379/0
-      # 如果在 1panel 内部网络，可能需要使用具体的 IP 或 network alias
-      # host.docker.internal 在某些 Linux 环境需要额外配置，下文 network_mode host 是一种解法
-    # network_mode: "host" # 简单粗暴连通宿主机数据库，或使用 bridge + internal ip
+      # 请使用最小权限数据库账号（切勿使用 MySQL root 账号）
+      - DATABASE_URL=mysql+aiomysql://flow_user:${MYSQL_PASSWORD}@host.docker.internal:3306/project_flow
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@host.docker.internal:6379/0
+      # 强随机 JWT 密钥（至少 32 位，优先于 config.json）
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      # 允许跨域的前端源（逗号分隔，生产环境请替换为真实域名）
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:8081,http://127.0.0.1:8081}
+      # 如果在 1panel 内部网络，可使用内网网桥 IP（如 172.17.0.1）替代 host.docker.internal
 
 networks:
   default:

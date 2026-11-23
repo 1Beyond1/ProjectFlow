@@ -1,24 +1,42 @@
+import getpass
 import sys
 
 try:
-    from passlib.context import CryptContext
+    import bcrypt
 except ImportError:
-    print("Error: 'passlib' module not found.")
-    print("Please check your python environment or run: pip install passlib bcrypt")
+    print("Error: 'bcrypt' module not found.")
+    print("Please check your python environment or run: pip install bcrypt")
     sys.exit(1)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password exceeds bcrypt's 72-byte limit.")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python gen_hash.py <your_new_password>")
+    try:
+        pwd = getpass.getpass("Enter new password: ")
+        confirm = getpass.getpass("Confirm new password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
         sys.exit(1)
-    
-    pwd = sys.argv[1]
-    hashed = hash_password(pwd)
-    print(f"\nPassword: {pwd}")
-    print(f"Hash:     {hashed}")
-    print(f"\n[Action] Please copy the Hash string above and update the 'password_hash' column in your flow.db file.")
+
+    if not pwd:
+        print("Error: Password cannot be empty.")
+        sys.exit(1)
+
+    if pwd != confirm:
+        print("Error: Passwords do not match.")
+        sys.exit(1)
+
+    try:
+        hashed = hash_password(pwd)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    print(f"\nHash: {hashed}")
+    print("\n[Action] Please copy the Hash string above and update the 'password_hash' column in your database.")

@@ -2,15 +2,19 @@
 SQLAlchemy ORM model definitions.
 Supports SQLite (dev) and MySQL (prod).
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import enum
 
-from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, Enum as SQLEnum
+from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, UniqueConstraint, Enum as SQLEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.mutable import MutableDict
 
 from types_local import JSONEncodedDict
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -57,7 +61,7 @@ class User(Base):
     pomo_total_focus_sec: Mapped[int] = mapped_column(Integer, default=0)
     pomo_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now_naive)
 
     # Relationships
     records: Mapped[List["Record"]] = relationship(
@@ -76,7 +80,7 @@ class Record(Base):
     ai_json: Mapped[str] = mapped_column(Text)
     device_id: Mapped[str] = mapped_column(String(100), index=True)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now_naive)
 
     # Relationships
     user: Mapped[Optional["User"]] = relationship("User", back_populates="records")
@@ -89,12 +93,15 @@ class SystemConfig(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     key: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     value: Mapped[str] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)
 
 
 class DeviceUsage(Base):
     """Daily usage tracking for guest devices."""
     __tablename__ = "device_usage"
+    __table_args__ = (
+        UniqueConstraint("device_id", "usage_date", name="uq_device_usage_date"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[str] = mapped_column(String(100), index=True)
@@ -102,4 +109,4 @@ class DeviceUsage(Base):
     text_count: Mapped[int] = mapped_column(Integer, default=0)
     stt_count: Mapped[int] = mapped_column(Integer, default=0)
     vision_count: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now_naive, onupdate=_utc_now_naive)

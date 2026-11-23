@@ -1,0 +1,23 @@
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.pytest_cache/
+
+# Local secrets & databases
+config.json
+.env
+.env.*
+*.db
+*.sqlite3
+
+# Runtime temp directories
+temp_audio/
+temp_images/
+
+# Tests & VCS
+tests/
+.git/
+.gitignore
