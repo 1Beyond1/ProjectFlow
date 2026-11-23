@@ -557,3 +557,54 @@
 1. TimerStore 增加 `mode` 与 `setMode`，兼容正计时/倒计时。
 2. 计时逻辑支持正计时增长、倒计时归零完成。
 3. Web 番茄钟卡片补充重置按钮、计时模式切换与时长快速选择。
+
+
+## 2026-11-23 | 安全止血、核心缺陷修复与工程化加固
+
+**When**: 2026-11-23 17:35
+**Where**:
+- backend/security.py
+- backend/auth.py
+- backend/main.py
+- backend/database.py
+- backend/models.py
+- backend/routers/auth.py
+- backend/routers/pomodoro.py
+- backend/schemas/pomodoro.py
+- backend/gen_hash.py
+- backend/requirements.txt
+- backend/Dockerfile
+- backend/.dockerignore
+- backend/tests/
+- docker-compose.yml
+- frontend/utils/date.ts
+- frontend/services/api.ts
+- frontend/store/useAuthStore.ts
+- frontend/store/useConfigStore.ts
+- frontend/store/useTaskStore.ts
+- frontend/store/useLanguageStore.ts
+- frontend/app/_layout.tsx
+- frontend/app/(tabs)/calendar.tsx
+- frontend/app/(tabs)/settings.tsx
+- frontend/app/(tabs)/stats.tsx
+- frontend/app/settings/events.tsx
+- frontend/components/DateTimeWheelPicker.tsx
+- frontend/components/MonthPicker.tsx
+- frontend/components/VoiceInputBar.tsx
+- frontend/components/web_screens/WebCalendarScreen.tsx
+- frontend/components/web_screens/WebTasksScreen.tsx
+- frontend/hooks/useBanCheck.ts
+- frontend/hooks/useStatsData.ts
+- setup.sh
+- .github/workflows/ci.yml
+- CLOUD_DEPLOYMENT.md
+- CONFIG_GUIDE.md
+- README.md
+- README.en.md
+
+**Why**: 修复审计发现的 5 项 P0 安全漏洞（SSRF 与 Vision Key 窃取、`/api/records` 未鉴权越权、硬编码弱 JWT fallback、JWT 类型混淆与 Refresh Token 重放未吊销、封禁 Fail-Open 及 403 缺 CORS 头）以及多项前后端 P1 核心缺陷，补齐自动化测试与 CI。
+
+**What**:
+1. **后端 P0/P1 安全与稳定性**：新增 `backend/security.py` 实现出站 HTTPS/DNS/IP SSRF 校验、URL 脱敏、客户端时间严格校验与分块流式上传限流；`/api/records` 强制鉴权按 `user_id` 隔离；移除硬编码弱 JWT 密钥并强制启动与验签校验；Refresh Token 引入 `jti` + SHA-256 哈希轮换/重放吊销并新增 `POST /auth/logout`；封禁校验在 Redis 不可用时回落数据库 Fail-Closed 且调整中间件顺序保证 403 带 CORS 头；配额改用条件更新原子预扣与失败回滚；番茄钟显式 `flag_modified`、提交失败清理 Redis dedup key、挂载 `/api/pomodoro/*`（保留 `/pomodoro/*` 兼容）；改用原生 `bcrypt` 消除 `passlib` 兼容问题并升级加固 `Dockerfile` / `docker-compose.yml`。
+2. **前端核心修复**：新增 `formatLocalDate`/`formatLocalDateTime` 全面替换本地日期 `toISOString` 用法修复东八区偏移；修正番茄钟时区偏移符号；为 `refreshAccessToken` 加 singleflight 锁、`fetchUserInfo` 限次重试且仅 401/403 登出；`stats.tsx` 改走 `fetchWithAuth` 并防护柱状图除零；支持 `EXPO_PUBLIC_API_URL` 与设置页编辑保存 `apiUrl`；等待 Zustand persist 水合后再初始化 `deviceId`；修复 `useBanCheck`、`parseErrorPayload`、Web `FormData` Blob 上传及 `VoiceInputBar` 失败恢复文本。
+3. **测试与工程化**：新增 20 项 `backend/tests/` `pytest` 测试覆盖全部 P0 与核心 P1，新增 `.github/workflows/ci.yml`，升级 `setup.sh` 生成 v2 `config.json` 并同步部署与配置文档。

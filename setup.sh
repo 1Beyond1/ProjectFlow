@@ -24,7 +24,7 @@ if command -v python3 &> /dev/null; then
 elif command -v python &> /dev/null; then
     PYTHON_CMD="python"
 else
-    echo "❌ 错误: 未找到 Python，请先安装 Python 3.9+"
+    echo "❌ 错误: 未找到 Python，请先安装 Python 3.10+"
     exit 1
 fi
 
@@ -54,12 +54,12 @@ pip install -r requirements.txt -q
 echo "✅ 后端依赖安装完成"
 
 # 创建临时目录
-mkdir -p temp_audio
-echo "✅ 临时目录已创建"
+mkdir -p temp_audio temp_images
+echo "✅ 临时目录已创建 (temp_audio, temp_images)"
 
 # ==================== 数据库初始化 ====================
 echo ""
-echo "📦 [2/4] 初始化数据库..."
+echo "📦 [2/4] 初始化数据库与配置文件..."
 echo "----------------------------"
 
 # 初始化数据库表结构
@@ -70,26 +70,85 @@ asyncio.run(init_db())
 print('✅ 数据库表结构已创建')
 "
 
-# 创建默认配置文件
+# 生成高强度随机 JWT 密钥（64 位十六进制，至少 32 字符）
+if command -v openssl &> /dev/null; then
+    JWT_SECRET="$(openssl rand -hex 32)"
+else
+    JWT_SECRET="$($PYTHON_CMD -c 'import secrets; print(secrets.token_hex(32))')"
+fi
+
+# 创建默认 v2 配置文件（与 backend/config.example.json 结构保持一致）
 if [ ! -f "config.json" ]; then
-    echo '{
-    "stt": {
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "SenseVoiceSmall",
-        "api_key": ""
+    cat <<EOF > config.json
+{
+    "vendors": {
+        "SiliconFlow": {
+            "base_url": "https://api.siliconflow.cn/v1",
+            "api_key": "YOUR_SILICONFLOW_API_KEY_HERE"
+        }
     },
-    "llm": {
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "Qwen/Qwen2.5-7B-Instruct",
-        "api_key": ""
+    "defaults": {
+        "free": {
+            "llm": "Qwen/Qwen3-8B",
+            "vision": "THUDM/GLM-4.1V-9B-Thinking",
+            "stt": "FunAudioLLM/SenseVoiceSmall"
+        },
+        "vip": {
+            "llm": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+            "vision": "THUDM/GLM-4.1V-9B-Thinking",
+            "stt": "FunAudioLLM/SenseVoiceSmall"
+        }
     },
-    "llm_vip": {
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "deepseek-ai/DeepSeek-V3",
-        "api_key": ""
+    "models": {
+        "llm": [
+            {
+                "id": "Qwen/Qwen3-8B",
+                "name": "Qwen3-8B",
+                "vendor": "SiliconFlow",
+                "tier": "free",
+                "is_default": true
+            },
+            {
+                "id": "Qwen/Qwen2.5-7B-Instruct",
+                "name": "Qwen2.5-7B-Instruct",
+                "vendor": "SiliconFlow",
+                "tier": "free",
+                "tag": "快速模型"
+            },
+            {
+                "id": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+                "name": "DeepSeek-R1-0528-Qwen3-8B",
+                "vendor": "SiliconFlow",
+                "tier": "vip"
+            },
+            {
+                "id": "THUDM/GLM-Z1-9B-0414",
+                "name": "GLM-Z1-9B-0414",
+                "vendor": "SiliconFlow",
+                "tier": "vip"
+            }
+        ],
+        "vision": [
+            {
+                "id": "THUDM/GLM-4.1V-9B-Thinking",
+                "name": "GLM-4.1V-9B-Thinking",
+                "vendor": "SiliconFlow",
+                "tiers": ["free", "vip"],
+                "is_default": true
+            }
+        ],
+        "stt": [
+            {
+                "id": "FunAudioLLM/SenseVoiceSmall",
+                "name": "SenseVoiceSmall",
+                "vendor": "SiliconFlow",
+                "tiers": ["free", "vip"],
+                "is_default": true
+            }
+        ]
     },
     "jwt": {
-        "secret_key": "change-this-in-production-'$(openssl rand -hex 32)'",
+        "secret_key": "${JWT_SECRET}",
         "algorithm": "HS256",
         "access_token_expire_minutes": 60,
         "refresh_token_expire_days": 30
@@ -97,8 +156,9 @@ if [ ! -f "config.json" ]; then
     "limits": {
         "free_daily_limit": 10
     }
-}' > config.json
-    echo "✅ 默认配置文件已创建"
+}
+EOF
+    echo "✅ 默认 v2 配置文件已创建（已自动生成 64 位随机 JWT 密钥，请按需填入 vendors.SiliconFlow.api_key）"
 else
     echo "📁 配置文件已存在，跳过创建"
 fi
@@ -118,33 +178,19 @@ fi
 
 echo "✅ 使用 Node.js: $(node --version)"
 
-# 检查前端目录是否已初始化
-if [ ! -d "frontend/node_modules" ]; then
-    echo "📁 创建 Expo 项目..."
-    
-    # 如果 frontend 目录存在但没有 package.json，删除它
-    if [ -d "frontend" ] && [ ! -f "frontend/package.json" ]; then
-        rm -rf frontend
-    fi
-    
-    # 创建 Expo 项目
-    if [ ! -d "frontend" ]; then
-        npx -y create-expo-app@latest frontend --template blank-typescript
-    fi
-    
+# 安装前端依赖
+if [ -f "frontend/package.json" ]; then
     cd frontend
-    
-    echo "📥 安装前端依赖..."
-    npx expo install expo-av expo-router nativewind tailwindcss zustand @react-native-async-storage/async-storage react-native-safe-area-context react-native-screens expo-linking expo-constants expo-status-bar
-    
-    # 安装 NativeWind 相关
-    npm install --save-dev tailwindcss@3.3.2
-    
-    echo "✅ 前端依赖安装完成"
+    if [ ! -d "node_modules" ]; then
+        echo "📥 安装前端依赖..."
+        npm install -q
+    else
+        echo "📁 前端依赖已存在，跳过安装"
+    fi
+    echo "✅ 前端依赖准备完成"
 else
-    echo "📁 前端项目已存在，跳过创建"
-    cd frontend
-    npm install -q
+    echo "❌ 错误: 未找到 frontend/package.json"
+    exit 1
 fi
 
 # ==================== 完成 ====================
@@ -164,7 +210,7 @@ echo "  cd frontend"
 echo "  npx expo start"
 echo ""
 echo "📚 重要文档:"
-echo "  - CONFIG_GUIDE.md    配置热切换指南"
+echo "  - CONFIG_GUIDE.md      配置热切换指南"
 echo "  - CLOUD_DEPLOYMENT.md  云部署教程"
 echo ""
 echo "=================================="

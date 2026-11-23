@@ -7,7 +7,7 @@
 ## Tech Stack
 
 - **Frontend**: Expo 54 (React Native + React Native Web + TypeScript) + Expo Router + NativeWind v4 + Zustand
-- **Backend**: Python FastAPI + SQLAlchemy (async dual-mode: SQLite by default for local dev, MySQL via `mysql+aiomysql` for production) + Redis (optional, banned-user cache sync) + JWT auth
+- **Backend**: Python FastAPI + SQLAlchemy (async dual-mode: SQLite by default for local dev, MySQL via `mysql+aiomysql` for production) + Redis (atomic ban-list cache sync & Pomodoro idempotency) + JWT auth (Refresh Token SHA-256 hash rotation & revocation)
 - **AI Services**: OpenAI-compatible STT / LLM / Vision providers (defaults to SiliconFlow: `FunAudioLLM/SenseVoiceSmall`, `Qwen/Qwen3-8B` / `Qwen/Qwen2.5-7B-Instruct`, `THUDM/GLM-4.1V-9B-Thinking`, with hot-reloading via `backend/config.json`)
 
 ## Project Structure
@@ -19,20 +19,24 @@ ProjectFlow/
 │   ├── components/           # Mobile and Web UI components
 │   ├── hooks/                # Audio recording, stats, and ban-check hooks
 │   ├── services/             # Backend API client
-│   └── store/                # Zustand stores (tasks, Pomodoro, auth, config, i18n)
+│   ├── store/                # Zustand stores (tasks, Pomodoro, auth, config, i18n)
+│   └── utils/                # Local date formatting, image compression & UUID utilities
 ├── backend/                  # FastAPI backend service
-│   ├── main.py               # App entrypoint, AI extraction & task analysis endpoints
-│   ├── routers/              # Auth (/auth), Pomodoro (/pomodoro), chat health
+│   ├── main.py               # App entrypoint, AI extraction, records & analysis endpoints
+│   ├── auth.py               # Strong JWT validation, native bcrypt, ban checks & config loader
+│   ├── security.py           # Outbound SSRF validator, URL masking, time & upload guards
+│   ├── routers/              # Auth (/auth), Pomodoro (/api/pomodoro + /pomodoro compat), chat health
 │   ├── schemas/              # Pydantic request/response schemas
-│   ├── database.py           # Async SQLAlchemy & Redis initialization
-│   ├── auth.py               # JWT auth, rate limits & model config loader
-│   ├── config.example.json   # Server-side multi-model config template
-│   ├── Dockerfile            # Backend container image definition
+│   ├── database.py           # Async SQLAlchemy, atomic quota reserve/refund & Redis init
+│   ├── tests/                # Pytest security & regression test suite
+│   ├── config.example.json   # Server-side v2 multi-model config template
+│   ├── Dockerfile            # Python 3.12 non-root backend container definition
 │   └── requirements.txt      # Python dependencies
-├── docker-compose.yml        # Docker Compose backend orchestration
-├── setup.sh                  # One-command environment setup script
-├── CONFIG_GUIDE.md           # Hot-reloading config.json guide (in Chinese)
-├── CLOUD_DEPLOYMENT.md       # Cloud deployment guide (1Panel / Docker Compose / Web export, in Chinese)
+├── .github/workflows/ci.yml  # GitHub Actions CI (backend pytest + frontend tsc)
+├── docker-compose.yml        # Hardened Docker Compose setup (127.0.0.1:8000 binding)
+├── setup.sh                  # One-command setup script (v2 config.json + strong JWT secret)
+├── CONFIG_GUIDE.md           # Hot-reloading v2 config.json guide (in Chinese)
+├── CLOUD_DEPLOYMENT.md       # Cloud deployment guide (1Panel / Docker Compose / Reverse Proxy)
 ├── LICENSE                   # MIT License
 └── README.md                 # Chinese README
 ```
@@ -46,25 +50,27 @@ ProjectFlow/
 bash setup.sh
 
 # Or set up manually:
-# Backend (Python 3.9+)
+# Backend (Python 3.10+, 3.12 recommended)
 cd backend
 python -m venv venv
 .\venv\Scripts\activate    # Windows
 # source venv/bin/activate # Linux / macOS
 pip install -r requirements.txt
 
-# Frontend (Node.js 18+)
+# Frontend (Node.js 18+, 20 recommended)
 cd frontend
 npm install
 ```
 
-### 2. Configure Backend `config.json`
+### 2. Configure Backend `config.json` & Environment Variables
 
-Copy `backend/config.example.json` to `backend/config.json` and fill in your API key(s) and `jwt.secret_key` (`setup.sh` generates a starter `backend/config.json` if one does not exist). Configuration is reloaded per request without restarting the server — see [CONFIG_GUIDE.md](CONFIG_GUIDE.md) (in Chinese).
+Copy `backend/config.example.json` to `backend/config.json` and set your provider `api_key` and a strong random `jwt.secret_key` (at least 32 characters; placeholders and weak keys are rejected). Running `setup.sh` generates a v2 `backend/config.json` with a 64-hex random secret automatically. See [CONFIG_GUIDE.md](CONFIG_GUIDE.md).
 
-Optional environment variables:
-- `DATABASE_URL`: SQLAlchemy async database URL (defaults to local `sqlite+aiosqlite:///.../flow.db`; set `mysql+aiomysql://...` for MySQL in production)
-- `REDIS_URL`: Redis connection URL (defaults to `redis://localhost:6379/0`; logs a warning and degrades if Redis is unavailable)
+Environment variables:
+- `JWT_SECRET_KEY`: JWT signing secret (**takes precedence over `config.json`**, minimum 32 chars; recommended for production)
+- `DATABASE_URL`: Async SQLAlchemy URL (defaults to local `sqlite+aiosqlite:///.../flow.db`; use `mysql+aiomysql://flow_user:...@host:3306/project_flow` in production)
+- `REDIS_URL`: Redis connection URL (defaults to `redis://localhost:6379/0`, passwords masked in logs; ban checks fail closed via DB fallback if Redis is unavailable)
+- `CORS_ALLOW_ORIGINS`: Comma-separated list of allowed frontend origins (defaults to localhost Expo origins)
 
 ### 3. Start the Backend
 
@@ -76,23 +82,27 @@ cd backend
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The backend runs at `http://localhost:8000`, with interactive OpenAPI docs at `http://localhost:8000/docs`.
+The backend runs at `http://localhost:8000`, with OpenAPI docs at `http://localhost:8000/docs`.
 
 ### 4. Start the Frontend
 
 ```bash
 cd frontend
+# Optional: set default backend URL via env var (defaults to http://localhost:8000)
+# EXPO_PUBLIC_API_URL=http://192.168.1.100:8000 npx expo start
 npx expo start          # Mobile (scan QR code in Expo Go)
 # npx expo start --web  # Web development preview
 ```
 
 ## Developer Configuration
 
-In addition to server-side `backend/config.json`, you can configure the following fields in the app's **Settings** screen (when the server's `config.json` already defines an `api_key`, server config takes precedence):
+- The default backend URL reads `EXPO_PUBLIC_API_URL` and falls back to `http://localhost:8000`.
+- You can edit and save `API URL` directly in **Settings -> Developer Options**.
+- When server-side `config.json` configures a provider `api_key`, the backend never sends server credentials to client-supplied `Base-Url` headers.
 
 | Setting | Description | Default / Example |
 |---------|-------------|-------------------|
-| API URL (`apiUrl`) | Backend server URL | `http://192.168.1.100:8000` |
+| API URL (`apiUrl`) | Backend server URL (editable in Settings) | `http://localhost:8000` |
 | STT (`sttBaseUrl` / `sttApiKey` / `sttModel`) | Speech-to-text provider URL, key, and model | `https://api.siliconflow.cn/v1` / `FunAudioLLM/SenseVoiceSmall` |
 | LLM (`llmBaseUrl` / `llmApiKey` / `llmModel`) | Language model provider URL, key, and model | `https://api.siliconflow.cn/v1` / `Qwen/Qwen2.5-7B-Instruct` (backend default `Qwen/Qwen3-8B`, VIP default `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`) |
 | Vision (`visionModel`) | Vision model for image extraction | `THUDM/GLM-4.1V-9B-Thinking` |
@@ -101,82 +111,60 @@ In addition to server-side `backend/config.json`, you can configure the followin
 
 ### Health & Model Catalog
 
-- `GET /`, `GET /api/health`: Service health check
-- `GET /api/models`: Returns available LLM / Vision / STT models and tier limits
+- `GET /`, `GET /api/health`: Service health check (does not expose server filesystem paths)
+- `GET /api/models`: Returns available LLM / Vision / STT models and remaining tier quotas
 - `GET /api/chat/health`: Chat router health check
 
 ### AI Task Extraction & Analysis
 
-#### `POST /api/process-audio`
-
-Uploads an audio clip (10 MB limit), transcribes it via STT, and extracts structured tasks with an LLM.
-
-**Headers (all optional; server `config.json` takes precedence when configured):**
-- `Authorization`: `Bearer <access_token>` (applies authenticated user tier & rate limits)
-- `X-STT-Base-Url` / `X-STT-Key` / `X-STT-Model`: Custom STT endpoint, key, and model
-- `X-LLM-Base-Url` / `X-LLM-Key` / `X-LLM-Model`: Custom LLM endpoint, key, and model
-- `X-Device-ID`: Client device identifier
-- `X-Client-Time`: Client local timestamp (helps resolve relative due times)
-
-**Body (`multipart/form-data`):**
-- `file`: Audio file (defaults to `.aac` extension)
-
-**Response:**
-```json
-{
-  "success": true,
-  "raw_text": "明天下午三点开会",
-  "ai_result": {
-    "tasks": [
-      {
-        "title": "开会",
-        "time": "明天下午三点",
-        "suggestion": "建议提前准备会议材料",
-        "priority": "high"
-      }
-    ],
-    "summary": "一个会议提醒"
-  },
-  "record_id": 1
-}
-```
-
-#### Other Processing & Utility Endpoints
-
-- `POST /api/process-text`: Extract tasks from plain text (JSON: `{"text": "..."}`; optional `X-LLM-*`, `X-Device-ID`, `X-Client-Time`, `Authorization`)
-- `POST /api/process-image`: Extract tasks from an uploaded image (login required; optional `X-Vision-Base-Url` / `X-Vision-Key` / `X-Vision-Model`)
-- `POST /api/analyze-tasks`: AI categorization and summary across tasks in a date range (VIP only)
-- `GET /api/records`: List historical parsing records (optional query params `device_id`, `limit`)
-- `POST /api/test-connection`: Validate an LLM API key against `{X-LLM-Base-Url}/models` (headers: required `X-LLM-Key`, optional `X-LLM-Base-Url`)
+- `POST /api/process-audio`: Stream-limited audio upload (10 MB max), STT transcription, and LLM task extraction (`X-Client-Time` strictly validated as `YYYY-MM-DD HH:MM:SS`)
+- `POST /api/process-text`: Extract tasks from plain text (JSON `{"text": "..."}`, 1-10000 chars; propagates HTTP 429 on quota limit)
+- `POST /api/process-image`: Extract tasks from an uploaded image (login required, 10 MB max + image magic-byte validation, atomic quota reserve & failure refund; ignores `X-Vision-Base-Url` unless client supplies its own `X-Vision-Key`)
+- `POST /api/analyze-tasks`: AI categorization and summary across tasks in a date range (VIP only, validated schema)
+- `GET /api/records`: **Authentication required**; strictly scoped to the authenticated user's own records (`limit` bounded `1..100`)
+- `POST /api/test-connection`: **Authentication required**; validates an LLM API key with strict public-HTTPS SSRF protection, `follow_redirects=False`, and sanitized error messages
 
 ### Authentication & Pomodoro
 
-- `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, `POST /auth/refresh`: Registration, login, profile lookup, and token refresh
-- `POST /pomodoro/end`, `GET /pomodoro/stats`: Record Pomodoro sessions and query focus statistics
+- `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, `POST /auth/refresh`, `POST /auth/logout`: Registration, anti-enumeration login, profile lookup, Refresh Token SHA-256 rotation/replay revocation, and logout
+- `POST /api/pomodoro/end`, `GET /api/pomodoro/stats`: Record Pomodoro sessions and query focus stats (`/pomodoro/*` kept for backwards compatibility)
+
+## Testing & Type Checking
+
+```bash
+# Backend pytest suite
+cd backend
+pip install -r requirements.txt pytest
+pytest -v
+
+# Frontend TypeScript check
+cd frontend
+npm ci
+npx tsc --noEmit
+```
 
 ## Deployment
 
 ### Docker Compose / 1Panel
 
-The repository includes [`docker-compose.yml`](docker-compose.yml) and [`backend/Dockerfile`](backend/Dockerfile) for containerized deployment with MySQL and Redis, alongside static web export (`npx expo export -p web`). See [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) (in Chinese) for full steps.
+The repository ships hardened [`docker-compose.yml`](docker-compose.yml) and [`backend/Dockerfile`](backend/Dockerfile) definitions (Python 3.12 non-root runtime, `127.0.0.1:8000` loopback binding, read-only config mount). See [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) for full deployment steps and reverse proxy rules (**proxy both `/api/` and `/auth/`**).
 
-### Baota Panel
+### Nginx Reverse Proxy Example
 
-1. **Open port**: Allow port `8000` in your cloud security group and firewall.
-2. **Create Python project**:
-   - Project path: `/www/wwwroot/project-flow/backend`
-   - Python version: 3.9+
-   - Install dependencies: `pip install -r requirements.txt`
-   - Startup file: `main.py`
-   - Start command: `python -m uvicorn main:app --host 0.0.0.0 --port 8000`
-3. **Optional Nginx reverse proxy**:
-   ```nginx
-   location /api {
-       proxy_pass http://127.0.0.1:8000;
-       proxy_set_header Host $host;
-       proxy_set_header X-Real-IP $remote_addr;
-   }
-   ```
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000/api/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    client_max_body_size 12m;
+}
+
+location /auth/ {
+    proxy_pass http://127.0.0.1:8000/auth/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
 
 ## Audio Optimization
 
@@ -195,18 +183,16 @@ A 10-second clip is roughly 40 KB, allowing fast uploads even on slow connection
 
 ### Web (Desktop)
 
-1. **Stats chart rendering**: Dynamic NativeWind styles were replaced with standard `StyleSheet` on Web, so some charts may overflow on narrow viewports. `react-native-chart-kit` also renders more slowly on Web with large datasets.
-2. **Pomodoro Web sync**: Cloud sync for Pomodoro sessions is wired up, but offline-reconnect retry behavior for the pending queue has not been thoroughly tested on Web and may drop a record in edge cases.
-3. **HTTP (non-HTTPS) environments**: `expo-crypto`'s `randomUUID()` throws outside secure contexts; a `try/catch` + `Math.random` fallback is in place, though HTTPS is recommended for production to avoid collision risk.
-4. **Hard-coded CORS allowlist**: `backend/main.py` currently hard-codes development origins in `allow_origins`. Update `allow_origins` before deploying to production.
-5. **Cross-device sync**: After logging in on Web, historical tasks and Pomodoro stats require a manual refresh rather than automatic background sync; some backend GET endpoints are not yet fully wired into the frontend.
+1. **Stats chart rendering**: `react-native-chart-kit` renders more slowly on Web with large datasets and may overflow on narrow viewports.
+2. **HTTP (non-HTTPS) environments**: `expo-crypto`'s `randomUUID()` falls back to pseudo-random UUIDs outside secure contexts; HTTPS is recommended for production.
+3. **Cross-device sync**: Historical tasks and Pomodoro stats currently require a manual refresh after login rather than automatic background two-way sync.
 
 ### Mobile
 
-1. **Android calendar scrolling**: Rapid scrolling on the calendar `FlatList` can occasionally blank out on some devices (observed on Redmi K80) due to `nestedScrollEnabled` interacting with NativeWind's CSS interop layer.
+1. **Android calendar scrolling**: Rapid scrolling on the calendar `FlatList` can occasionally blank out on some devices due to NativeWind's CSS interop layer.
 2. **iOS video preview**: Not yet implemented; only photo previews are supported.
 
 ### General
 
-1. **Audio format coverage**: Backend STT has only been tested with 32 kbps AAC audio; other formats/bitrates are unverified.
-2. **SQLite concurrency**: Local development defaults to SQLite, which can raise `database is locked` under concurrent writes. Use MySQL via `DATABASE_URL` in production.
+1. **Audio format coverage**: Backend STT has primarily been verified with 32 kbps AAC audio.
+2. **SQLite concurrency**: Local development defaults to SQLite; switch to MySQL via `DATABASE_URL` for high-concurrency production workloads.
