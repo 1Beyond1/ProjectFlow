@@ -45,10 +45,12 @@ export const Sidebar = () => {
             <View className="flex flex-col gap-10 items-center xl:items-start w-full">
                 {/* Logo */}
                 <View className="flex-row items-center gap-3 xl:ml-2">
-                    <View className="size-10 rounded-2xl bg-primary flex items-center justify-center shadow-lg shadow-primary/30 shrink-0" style={{ width: 40, height: 40, backgroundColor: Colors.primary }}>
-                        <Ionicons name="flower" size={24} color="white" />
-                    </View>
-                    <Text className="hidden xl:block text-xl font-extrabold tracking-tight" style={{ color: Colors.textMain }}>FlowRemind</Text>
+                    <Image
+                        source={require('../../assets/icon.png')}
+                        style={{ width: 40, height: 40, borderRadius: 12 }}
+                        resizeMode="cover"
+                    />
+                    <Text className="hidden xl:block text-xl font-extrabold tracking-tight" style={{ color: Colors.textMain }}>ProjectFlow</Text>
                 </View>
 
                 {/* Nav */}

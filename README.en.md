@@ -1,8 +1,22 @@
 [简体中文](README.md) | English
 
+<p align="center">
+  <img src="docs/assets/logo.png" alt="ProjectFlow Logo" width="84" />
+</p>
+
 # Project Flow
 
 > AI-Powered Cross-Platform Voice, Text & Image Task and Focus Reminder App (iOS / Android / Web)
+
+## Interface Preview
+
+### Web Desktop: Today Focus, Pomodoro Timer & AI Insights
+
+![ProjectFlow Web Desktop Dashboard](docs/screenshots/web-dashboard.png)
+
+| Mobile: Today Focus & Hold-to-Speak Voice Input | Web Desktop: Multi-List Task Inbox |
+| :---: | :---: |
+| <img src="docs/screenshots/mobile-home.png" alt="ProjectFlow Mobile Today Dashboard & Voice Bar" width="260" /> | <img src="docs/screenshots/web-tasks.png" alt="ProjectFlow Web Desktop Tasks Inbox" width="560" /> |
 
 ## Tech Stack
 

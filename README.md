@@ -1,8 +1,22 @@
 简体中文 | [English](README.en.md)
 
+<p align="center">
+  <img src="docs/assets/logo.png" alt="ProjectFlow Logo" width="84" />
+</p>
+
 # Project Flow (心流清单)
 
 > AI 驱动的跨端语音 / 文字 / 图片任务与专注提醒应用（iOS / Android / Web）
+
+## 界面预览
+
+### Web 端：今日聚焦、番茄专注与 AI 洞察工作台
+
+![ProjectFlow Web 端今日聚焦与番茄专注工作台](docs/screenshots/web-dashboard.png)
+
+| 移动端：今日聚焦与按住说话语音输入 | Web 端：多列表任务收件箱管理 |
+| :---: | :---: |
+| <img src="docs/screenshots/mobile-home.png" alt="ProjectFlow 移动端今日聚焦与语音输入" width="260" /> | <img src="docs/screenshots/web-tasks.png" alt="ProjectFlow Web 端任务收件箱管理" width="560" /> |
 
 ## 技术栈
 
